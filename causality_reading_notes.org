@@ -1,0 +1,107 @@
+* definitions
+** [[https://en.wikipedia.org/wiki/Identifiability#:~:text=In%2520statistics%252C%2520identifiability%2520is%2520a,number%2520of%2520observations%2520from%2520it.][identifiability]] in math
+
+A model is identifiable if it is theoretically possible to learn the true values
+of this model's underlying parameters after obtaining an infinite number of
+observations from it. Mathematically, this is equivalent to saying that
+different values of the parameters must generate different probability
+distributions of the observable variables.
+
+** stability / invariance   
+
+   These are assumptions on the interventions of the graphical model for causal
+   graphs: when intervention happen on one variable, the structure and the
+   functional form of other parts of the causal graph remain unchanged.
+
+* Do why package
+
+  [[https://www.microsoft.com/en-us/research/blog/dowhy-a-library-for-causal-inference/][article]]
+  [[https://github.com/microsoft/dowhy][code]]
+  
+  1. model: specify the causal graph
+  2. identify: using do calculus to identify estimands
+  3. estimate: estimate the identified estimands
+  3. refute: conduct robustness checks
+
+  aim: software with a simple interface to common causal inference methods for
+  reasoning and validating key assumptions.
+
+  fundamental problem: counterfactual (unobserved quantities)
+
+  assumptions need to be first-class in causal inference libraries.
+
+  principles:
+  1. making causal assumptions explicit
+  2. testing robustness of the estimates to violations of those assumptions
+
+  Distinction between identification and estimation, the former makes
+  assumptions on the data generation process; estimation is purely a statistical
+  problem of estimating the estimand from data.
+
+  Identification formal specification: uses Bayesian graphical model (specify
+  what they know, what they don't know). For estimation, uses potential-outcomes
+  framework like matching, stratification, and instrumental variables.
+
+  The cool part of the library is to explore cases where assumptions are broken
+  or varied using the refute methods.
+
+* Causal inference tutorials
+
+  [[http://www.degeneratestate.org/posts/2018/Mar/24/causal-inference-with-python-part-1-potential-outcomes/][blog post1]]
+  
+  conditional independence assumption: given covariate, the result of treatment
+  if independent from treatment value (ignorability: no unobserved confounders).
+
+  SUTVA: no network effect: action on one individual won't affect samples.
+  
+  methods:
+  1. modeling the counterfactual: model fitting, direct matching, etc
+  2. propensity score matching: make treatment independent of output given
+     propensity (this assumption helps in high dimensional settings)
+  3. inverse propensity score matching: the blog post have a nice explanation.
+  4. doubly robust weighted estimator: do a regression on IPS
+  5. trimming: only perform causal inference when propensity score is not
+     extreme (have high overlap regions)
+  6. Stratification: stratify samples based on propensity score
+
+
+  dangers
+  1. extrapolation when the treated and the control group does not have
+  significant overlap.
+
+  [[http://www.degeneratestate.org/posts/2018/Jul/10/causal-inference-with-python-part-2-causal-graphical-models/][blog post2]]
+  
+  Language of causal inference: Causal graphical models.
+  
+  Question: what can we say about interventions if we only know the structure,
+  but not the true functional relationship?
+
+  The package causal graphical models can draw the nodes and edges (use
+  jupyter notebook).
+
+  A causal graphical model is nice because it specifies conditional
+  distributions. Furthermore, the structure makes it much more compact to
+  describe a function (form exponential to something manageable).
+
+  Conditional independence is in general impossible. It is perhaps more useful
+  as a way to encode prior knowledge. 
+
+  Adjustment Formula: "do" calculus is used to transform do notations to ones
+  without the "do", assuming stability. The equation P(Y|do(x)) = something, is
+  often referred to as the adjustment formula or g-formula or backdoor
+  adjustment formula. It means we need to have some covariate, W, such that the
+  causal relationship is identifiable. W need to exist, and is sometime called
+  the backdoor criterion (W blocks all backdoor path between X and Y, and W does
+  not contain any descendants of X).
+
+  Causal graphical models answers if we can make causal inferences. The actual
+  estimation is simply the statistical estimation approaches. 
+  
+  [[http://www.degeneratestate.org/posts/2018/Sep/03/causal-inference-with-python-part-3-frontdoor-adjustment/][Blog post3]]: front door adjustment (another way to get at identifiability)
+
+  
+
+
+  
+
+  
