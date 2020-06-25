@@ -79,9 +79,10 @@ def topo_sort(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
     sources = [node for node in graph if indegrees[node] == 0]
     while sources:
-        s = sources.pop() # todo: should randomly pop
+        sources = list(np.random.permutation(sources))
+        s = sources.pop()
         order.append(s)
-        for u in s.children: # todo: should randomly permute
+        for u in np.random.permutation(s.children):
             indegrees[u] -= 1 # s is satisfied
             if indegrees[u] == 0:
                 sources.append(u)
@@ -126,7 +127,21 @@ def main():
     for node1, d in cf.edge_credit.items():
         for node2, val in d.items():
             print(f'credit {node1}->{node2}: {val}')
-    
+
+def memoize(f):
+    d = {}
+    def f_(n):
+        if n in d: return d[n]
+        d[n] = f(n)
+        return d[n]
+        
+    return f_
+
+@memoize
+def T(n):
+    if n == 1: return 1
+    return sum([T(i) for i in range(1, n)]) + 1
+
 if __name__ == '__main__':
     main()
 
