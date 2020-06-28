@@ -49,30 +49,36 @@ class Node:
 
 class CreditFlow:
 
-    def __init__(self):
+    def __init__(self, verbose=True):
         self.edge_credit = defaultdict(lambda: defaultdict(int))
+        self.verbose = verbose
 
     def credit(self, node, val):
         if node is None or node.from_node is None:
             return
 
         self.edge_credit[node.from_node.name][node.name] += val
-        print(f"assign {val} credits to {node.from_node}->{node}")
+        if self.verbose:
+            print(f"assign {val} credits to {node.from_node}->{node}")
         self.credit(node.from_node, val) # propagate upward
 
-    def dfs(self, node):
+    def dfs(self, node, order):
         if node.name == 'target':
             self.credit(node, node.val - node.last_val)
             return
 
-        for c in np.random.permutation(node.children):
+        for c in sorted(node.children,
+                        key=lambda x: (order[-1:] + order[1:]).index(x)):
+            # turn on edge follwing the order of [y] + order[:-1]
             # randomly turn on edges
-            print(f'turn on edge {node}->{c}')
+            if self.verbose:
+                print(f'turn on edge {node}->{c}')
             c.from_node = node
             c.last_val = c.val
             c.val = c.f(*[arg.val for arg in c.args])
-            print(f'{c} changes from {c.last_val} to {c.val}')
-            self.dfs(c)
+            if self.verbose:
+                print(f'{c} changes from {c.last_val} to {c.val}')
+            self.dfs(c, order)
 
 def topo_sort(graph):
     order = []
@@ -88,8 +94,12 @@ def topo_sort(graph):
                 sources.append(u)
     return order
 
-def main():
-    cf = CreditFlow()
+def main(verbose=False, nruns=100):
+    '''
+    verbose: whether to print out decision process
+    nruns: number of sampled valid timelines and permutations
+    '''
+    cf = CreditFlow(verbose=verbose)
     
     # build the graph: x1->x2, y = f(x1, x2)
     x1 = Node(0, 1, 'x1')
@@ -98,11 +108,11 @@ def main():
 
     # define functional form: here is specified, later learn
     y.f = lambda x1, x2: x1 + x2
-    x2.f = lambda x1: x1 # randomness assumes is the residue
+    x2.f = lambda x1: x1 # randomness assumes due to residue
 
     # run topological sort
     graph = [x1, x2, y]
-    for i in range(1): # random sample number of valid timelines
+    for i in range(nruns): # random sample number of valid timelines
         # make everything back to baseline
         for node in graph: node.reset()
         
@@ -111,22 +121,25 @@ def main():
             print("order cannot be satisfied")
             return
         else:
-            print(f"using order {order}")
+            if verbose:
+                print(f"using order {order}")
 
-        print("baselines " +\
-              ", ".join(map(lambda node: f"{node}: {node.last_val}",
-                            order)))
+        if verbose:
+            print("baselines " +\
+                  ", ".join(map(lambda node: f"{node}: {node.last_val}",
+                                order)))
         # follow the order
         for node in order:
-            print(f"turn on node {node} form {node.val} to {node.target}")
+            if verbose:
+                print(f"turn on node {node} form {node.val} to {node.target}")
             node.val = node.target # turn on the node
             node.from_node = None # turn off the source
             # note: additional contribution is from random source
-            cf.dfs(node)
+            cf.dfs(node, order)
 
     for node1, d in cf.edge_credit.items():
         for node2, val in d.items():
-            print(f'credit {node1}->{node2}: {val}')
+            print(f'credit {node1}->{node2}: {val/nruns}')
 
 def memoize(f):
     d = {}
