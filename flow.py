@@ -5,7 +5,7 @@ import networkx as nx
 
 class Node:
 
-    def __init__(self, name, f=None, args=[], children=[]):
+    def __init__(self, name, f=None, args=[], children=[], is_target_node=False):
         '''
         name: name of the node
         f: functional form of this variable on other variables
@@ -13,9 +13,11 @@ class Node:
         children: children of the node
         target: current value
         baseline: baseline value
+        is_target_node: is this node to explain
         '''
         self.name = name
         self.f = f
+        self.is_target_node = is_target_node
         
         self.args = []
         for arg in args:
@@ -54,26 +56,29 @@ class Node:
 
 class CreditFlow:
 
-    def __init__(self, verbose=True, nruns=10, permute_edges=False):
+    def __init__(self, verbose=True, nruns=10, permute_edges=False,
+                 noise_self_loop=False):
         ''' 
         verbose: whether to print out decision process        
         nruns: number of sampled valid timelines and permutations
         permute_edges: whether or not consider different ordering of edges, 
                        default False
+        noise_self_loop: whether use self loop for noise visualization
         '''
         self.edge_credit = defaultdict(lambda: defaultdict(int))
         self.verbose = verbose
         self.nruns = nruns
         self.permute_edges = permute_edges
+        self.noise_self_loop = noise_self_loop
 
     def credit(self, node, val):
         if node is None:
             return
         if node.from_node is None:
-            # the effect of noise term
+            # the effect of noise term: create a self loop
             self.edge_credit[node.name][node.name] += val
             if self.verbose:
-                print(f"assign {val} credits to {node.name}->{node}")
+                print(f"assign {val} credits to {node.name + '_noise'}->{node}")
             return
             
         self.edge_credit[node.from_node.name][node.name] += val
@@ -82,7 +87,7 @@ class CreditFlow:
         self.credit(node.from_node, val) # propagate upward
 
     def dfs(self, node, order):
-        if node.name == 'target':
+        if node.is_target_node:
             self.credit(node, node.val - node.last_val)
             return
 
@@ -139,7 +144,11 @@ class CreditFlow:
     def print_credit(self):
         for node1, d in self.edge_credit.items():
             for node2, val in d.items():
-                print(f'credit {node1}->{node2}: {val/self.nruns}')
+                if node1 ==  node2:
+                    # additive noise term
+                    print(f'credit {node1}_noise->{node2}: {val/self.nruns}')
+                else:
+                    print(f'credit {node1}->{node2}: {val/self.nruns}')
 
     def credit2dot(self):
         '''
@@ -152,13 +161,28 @@ class CreditFlow:
         '''
         G = nx.DiGraph()
         for node1, d in self.edge_credit.items():
-            if node1 not in G:
-                G.add_node(node1)
             for node2, val in d.items():
-                if node2 not in G:
-                    G.add_node(node2)
                 w = val/self.nruns
                 if w != 0:
+                    if self.noise_self_loop and node1 == node2:
+                        G.add_edge(node2, node2, weight=w, penwidth=abs(w),
+                                   label=str(w))
+                        continue
+
+                    if node1 == node2:
+                        node = node1 + "_noise"
+                        if node not in G:
+                            G.add_node(node, shape="point")
+                        G.add_edge(node, node2, weight=w, penwidth=abs(w),
+                                   label=str(w))
+                        continue
+                    
+                    if node1 not in G:
+                        G.add_node(node1)                    
+                    
+                    if node2 not in G:
+                        G.add_node(node2)                        
+                    
                     G.add_edge(node1, node2, weight=w, penwidth=abs(w),
                                label=str(w))
 
@@ -180,7 +204,9 @@ def topo_sort(graph):
 
 def check_baseline_target(graph):
     ''' graph is a list of nodes '''
+    n_targets = 0
     for node in graph:
+        if node.is_target_node: n_targets += 1
         if len(node.args) > 0:
             residue = node.baseline - node.f(*[arg.baseline for arg in node.args])
             if residue != 0:
@@ -189,6 +215,7 @@ def check_baseline_target(graph):
             residue = node.target - node.f(*[arg.target for arg in node.args])
             if residue != 0:
                 print(f"outcome additive noise for {node} is {residue}")
+    assert n_targets == 1, f"{n_targets} target node, need 1"
 
 # sample graphs
 def build_graph():
@@ -198,7 +225,7 @@ def build_graph():
     # build the graph: x1->x2, y = x1 + x2
     x1 = Node('x1')
     x2 = Node('x2', lambda x1: x1, [x1])
-    y  = Node('target', lambda x1, x2: x1 + x2, [x1, x2])    
+    y  = Node('y', lambda x1, x2: x1 + x2, [x1, x2], is_target_node=True)
     graph = [x1, x2, y]
     
     # initialize the values from data
@@ -218,7 +245,8 @@ def build_graph2():
     x1 = Node('x1')
     x2 = Node('x2', lambda x1: x1, [x1])
     x3 = Node('x3', lambda x2: x2, [x2])
-    y  = Node('target', lambda x1, x2, x3: x1 + x2 + x3, [x1, x2, x3])    
+    y  = Node('y', lambda x1, x2, x3: x1 + x2 + x3, [x1, x2, x3],
+              is_target_node=True)
     graph = [x1, x2, x3, y]
     
     # initialize the values from data
@@ -243,6 +271,3 @@ def main():
     
 if __name__ == '__main__':
     main()
-
-        
-        
