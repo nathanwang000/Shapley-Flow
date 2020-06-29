@@ -3,9 +3,70 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import networkx as nx
 
+class GraphIterator:
+    def __init__(self, graph):
+        self._graph = graph
+        self._index = 0 # keep track of current index
+
+    def __next__(self):
+        '''returns next node'''
+        if self._index < len(self._graph):
+            result = self._graph.nodes[self._index]
+            self._index += 1
+            return result
+
+        # end of iteration
+        raise StopIteration
+
+class Graph:
+    '''list of nodes'''
+    def __init__(self, nodes, baseline_sampler, target_values,
+                 treat_target_differently=True):
+        '''
+        nodes: sequence of Node object
+        baseline_sampler: a function ()->{name: val} where name
+                          point to a node in nodes
+        target_values: a dictionary {name: val} gives the current
+                       value of the explanation instance; name
+                       point to a node in nodes
+        treat_target_differently: the baseline for target node is 
+                                  set using its function on other
+                                  node's baseline
+        '''
+        self.nodes = list(set(nodes))
+        self.baseline_sampler = baseline_sampler
+        self.target_values = target_values
+        self.treat_target_differently = treat_target_differently
+        self.reset()
+
+    def __len__(self):
+        return len(self.nodes)
+
+    def __iter__(self):
+        return GraphIterator(self)
+    
+    def reset(self):
+        baseline_values = self.baseline_sampler()
+        target_nodes = [] 
+        for node in self.nodes:
+            if node.is_target_node and self.treat_target_differently:
+                target_nodes.append(node)
+                continue
+            node.set_baseline_target(baseline_values[node.name],
+                                     self.target_values[node.name])
+
+        # set the target node baseline using its args
+        if self.treat_target_differently:
+            assert len(target_nodes) == 1, \
+                f"{len(target_nodes)} target node, need 1"
+            node = target_nodes[0]
+            node.set_baseline_target(node.f(*[arg.baseline for arg in node.args]),
+                                     self.target_values[node.name])
+        
 class Node:
 
-    def __init__(self, name, f=None, args=[], children=[], is_target_node=False):
+    def __init__(self, name, f=None, args=[], children=[],
+                 is_target_node=False):
         '''
         name: name of the node
         f: functional form of this variable on other variables
@@ -117,7 +178,7 @@ class CreditFlow:
         # run topological sort
         for i in range(self.nruns): # random sample number of valid timelines
             # make value back to baseline
-            for node in graph: node.reset()
+            graph.reset()
 
             order = topo_sort(graph)
             if len(order) != len(graph):
@@ -163,10 +224,11 @@ class CreditFlow:
         for node1, d in self.edge_credit.items():
             for node2, val in d.items():
                 w = val/self.nruns
+                edge_label = "{:.2f}".format(w)
                 if w != 0:
                     if self.noise_self_loop and node1 == node2:
                         G.add_edge(node2, node2, weight=w, penwidth=abs(w),
-                                   label=str(w))
+                                   label=edge_label)
                         continue
 
                     if node1 == node2:
@@ -174,7 +236,7 @@ class CreditFlow:
                         if node not in G:
                             G.add_node(node, shape="point")
                         G.add_edge(node, node2, weight=w, penwidth=abs(w),
-                                   label=str(w))
+                                   label=edge_label)
                         continue
                     
                     if node1 not in G:
@@ -184,7 +246,7 @@ class CreditFlow:
                         G.add_node(node2)                        
                     
                     G.add_edge(node1, node2, weight=w, penwidth=abs(w),
-                               label=str(w))
+                               label=edge_label)
 
         return nx.nx_pydot.to_pydot(G)
     
@@ -217,7 +279,7 @@ def check_baseline_target(graph):
                 print(f"outcome additive noise for {node} is {residue}")
     assert n_targets == 1, f"{n_targets} target node, need 1"
 
-# sample graphs
+# sample graph
 def build_graph():
     '''
     build and return a graph (list of nodes), to be runnable in main
@@ -225,36 +287,15 @@ def build_graph():
     # build the graph: x1->x2, y = x1 + x2
     x1 = Node('x1')
     x2 = Node('x2', lambda x1: x1, [x1])
-    y  = Node('y', lambda x1, x2: x1 + x2, [x1, x2], is_target_node=True)
-    graph = [x1, x2, y]
+    y  = Node('target', lambda x1, x2: x1 + x2, [x1, x2], is_target_node=True)
     
-    # initialize the values from data
-    x1.set_baseline_target(0, 1)
-    x2.set_baseline_target(0, 1.5)
-    y.set_baseline_target(0, 2.5)
-
-    # check the amount of noise
-    check_baseline_target(graph)
-    return graph
+    # initialize the values from data: now is just specified
+    graph = Graph([x1, x2, y],
+                  # sample baseline
+                  lambda: {'x1': 0, 'x2': 0, 'target': 0},
+                  # target to explain
+                  {'x1': 1, 'x2': 1.5, 'target': 2.5})
     
-def build_graph2():
-    '''
-    build and return a graph (list of nodes), to be runnable in main
-    '''
-    # build the graph: x1->x2->x3, y = f(x1, x2, x3)
-    x1 = Node('x1')
-    x2 = Node('x2', lambda x1: x1, [x1])
-    x3 = Node('x3', lambda x2: x2, [x2])
-    y  = Node('y', lambda x1, x2, x3: x1 + x2 + x3, [x1, x2, x3],
-              is_target_node=True)
-    graph = [x1, x2, x3, y]
-    
-    # initialize the values from data
-    x1.set_baseline_target(0, 1)
-    x2.set_baseline_target(0, 1.5)
-    x3.set_baseline_target(0, 1)
-    y.set_baseline_target(0, 3.5)
-
     # check the amount of noise
     check_baseline_target(graph)
     return graph
@@ -263,7 +304,7 @@ def build_graph2():
 def main():
 
     cf = CreditFlow(verbose=False, nruns=1)
-    graph = build_graph2()
+    graph = build_graph()
     cf.run(graph)
     cf.print_credit()
 
