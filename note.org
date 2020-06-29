@@ -1,0 +1,33 @@
+* why only one order is available for a given timeline
+
+  Because we want to credit to flow to the source node, to mimic the
+  intervention scenario. See [[./toy_experiments.ipynb][ipython notebook]] for an example.
+  
+* why random permutation of edge is not practical
+
+  Consider a full graph of one timeline with n features.
+
+  For n=20, We would need
+
+  #+BEGIN_SRC python
+  def memoize(f):
+      d = {}
+      def f_(n):
+          if n in d: return d[n]
+          d[n] = f(n)
+          return d[n]
+          
+      return f_
+  
+  @memoize
+  def T(n):
+      if n == 1: return 1
+      return sum([T(i) for i in range(1, n)]) + 1
+
+  return T(20)
+  #+END_SRC
+
+  #+RESULTS:
+  : 524288
+
+  many function evaluations!
