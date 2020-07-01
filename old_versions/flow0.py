@@ -55,9 +55,6 @@ class Graph:
             node.set_baseline_target(baseline_values[node.name],
                                      self.target_values[node.name])
 
-            for c in node.children: # only activated edges change visibility
-                c.visible_arg_values[node] = node.baseline
-
         # set the target node baseline using its args
         if self.treat_target_differently:
             assert len(target_nodes) == 1, \
@@ -82,9 +79,6 @@ class Node:
         self.name = name
         self.f = f
         self.is_target_node = is_target_node
-
-        # arg values that are visible to the node
-        self.visible_arg_values = {}
         
         self.args = []
         for arg in args:
@@ -93,15 +87,16 @@ class Node:
         self.children = []
         for c in children:
             self.add_child(c)
-        
-    def set_baseline_target(self, baseline, target):
-        self.target = target
-        self.baseline = baseline
 
-        # reset value
+    def reset(self):
         self.last_val = self.baseline
         self.val = self.baseline
         self.from_node = None
+            
+    def set_baseline_target(self, baseline, target):
+        self.target = target
+        self.baseline = baseline
+        self.reset()
         
     def add_arg(self, node):
         '''add predecessor'''
@@ -122,14 +117,20 @@ class Node:
 
 class CreditFlow:
 
-    def __init__(self, verbose=True, nruns=10):
+    def __init__(self, verbose=True, nruns=10, permute_edges=False,
+                 noise_self_loop=False):
         ''' 
         verbose: whether to print out decision process        
         nruns: number of sampled valid timelines and permutations
+        permute_edges: whether or not consider different ordering of edges, 
+                       default False
+        noise_self_loop: whether use self loop for noise visualization
         '''
         self.edge_credit = defaultdict(lambda: defaultdict(int))
         self.verbose = verbose
         self.nruns = nruns
+        self.permute_edges = permute_edges
+        self.noise_self_loop = noise_self_loop
 
     def credit(self, node, val):
         if node is None:
@@ -151,15 +152,21 @@ class CreditFlow:
             self.credit(node, node.val - node.last_val)
             return
 
-        children_order = np.random.permutation(node.children)
+        if self.permute_edges:
+            children_order = np.random.permutation(node.children)
+        else:
+            # turn on edge follwing the order of [y] + order[:-1]
+            children_order = sorted(node.children,
+                                    key=lambda x: \
+                                    (order[-1:] + order[1:]).index(x))
+            
         for c in children_order:
 
             if self.verbose:
                 print(f'turn on edge {node}->{c}')
             c.from_node = node
             c.last_val = c.val
-            c.visible_arg_values[node] = node.val
-            c.val = c.f(*[c.visible_arg_values[arg] for arg in c.args])
+            c.val = c.f(*[arg.val for arg in c.args])
             if self.verbose:
                 print(f'{c} changes from {c.last_val} to {c.val}')
             self.dfs(c, order)
@@ -219,6 +226,10 @@ class CreditFlow:
                 w = val/self.nruns
                 edge_label = "{:.2f}".format(w)
                 if w != 0:
+                    if self.noise_self_loop and node1 == node2:
+                        G.add_edge(node2, node2, weight=w, penwidth=abs(w),
+                                   label=edge_label)
+                        continue
 
                     if node1 == node2:
                         node = node1 + "_noise"

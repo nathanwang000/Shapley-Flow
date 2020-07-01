@@ -1,3 +1,16 @@
 * MSR intern 2020
 
   Shapley value flow
+
+** versions
+
+   version 0: once a node's value is changed, make it visible to the output
+
+   version 1: only expose a node's new value if the edge to the target is
+   opened. This requires each node to keep track of its argument's value.
+   Difference from version 0 is in dfs part.
+
+** sanity check graphs
+
+   The [[./sanity_check_graphs.ipynb][notebook]] contains sanity check graphs for various flow approaches.
+
