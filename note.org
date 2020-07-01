@@ -1,8 +1,3 @@
-* why only one order is available for a given timeline
-
-  Because we want to credit to flow to the source node, to mimic the
-  intervention scenario. See [[./toy_experiments.ipynb][ipython notebook]] for an example.
-  
 * why random permutation of edge is not practical
 
   Consider a full graph of one timeline with n features.
