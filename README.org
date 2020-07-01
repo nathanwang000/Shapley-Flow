@@ -1,6 +1,8 @@
 * MSR intern 2020
 
   Shapley value flow
+  
+  Sample experiments in [[./flow1_synthetic_experiments.ipynb][notebook]]
 
 ** versions
 
