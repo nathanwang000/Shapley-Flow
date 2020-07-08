@@ -2,7 +2,6 @@ import numpy as np
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import networkx as nx
-import warnings
 
 class GraphIterator:
     def __init__(self, graph):
@@ -22,7 +21,7 @@ class GraphIterator:
 class Graph:
     '''list of nodes'''
     def __init__(self, nodes, baseline_sampler, target_values,
-                 treat_target_differently=True, verbose=False):
+                 treat_target_differently=True):
         '''
         nodes: sequence of Node object
         baseline_sampler: a function ()->{name: val} where name
@@ -38,7 +37,6 @@ class Graph:
         self.baseline_sampler = baseline_sampler
         self.target_values = target_values
         self.treat_target_differently = treat_target_differently
-        self.verbose = verbose
         self.reset()
 
     def __len__(self):
@@ -67,42 +65,11 @@ class Graph:
             node = target_nodes[0]
             node.set_baseline_target(node.f(*[arg.baseline for arg in node.args]),
                                      self.target_values[node.name])
-
-        self.check_baseline_target()
-
-    def check_baseline_target(self):
-        '''
-        check if baseline, target matches the functional form
-        '''
-        n_targets = 0
-        for node in topo_sort(self):
-            if node.is_target_node: n_targets += 1
-            if len(node.args) > 0:
-                computed_baseline = node.f(*[arg.baseline for arg in node.args])
-                computed_target = node.f(*[arg.target for arg in node.args])
-                
-                residue = node.baseline - computed_baseline
-                if residue != 0:
-
-                    if self.verbose:
-                        print(f"baseline for {node} has residue {residue}")
-                        print(f"enforcing baseline for {node}")
-                    node.set_baseline_target(computed_baseline, computed_target)
-
-                residue = node.target - computed_target
-                if residue != 0:
-
-                    if self.verbose:
-                        print(f"warning: outcome for {node} has residue {residue}")
-                        print(f"enforcing target for {node}")
-                    node.set_baseline_target(computed_baseline, computed_target)
-
-        assert n_targets == 1, f"{n_targets} target node, need 1"
-            
+        
 class Node:
 
     def __init__(self, name, f=None, args=[], children=[],
-                 is_target_node=False, is_noise_node=False):
+                 is_target_node=False):
         '''
         name: name of the node
         f: functional form of this variable on other variables
@@ -111,12 +78,10 @@ class Node:
         target: current value
         baseline: baseline value
         is_target_node: is this node to explain
-        is_noise_node: is this node a noise node
         '''
         self.name = name
         self.f = f
         self.is_target_node = is_target_node
-        self.is_noise_node = is_noise_node
 
         # arg values that are visible to the node
         self.visible_arg_values = {}
@@ -167,11 +132,16 @@ class CreditFlow:
         self.nruns = nruns
 
     def credit(self, node, val):
-        if node is None or node.from_node is None:
+        if node is None:
+            return
+        if node.from_node is None:
+            # the effect of noise term: create a self loop
+            self.edge_credit[node.name][node.name] += val
+            if self.verbose:
+                print(f"assign {val} credits to {node.name + '_noise'}->{node}")
             return
             
-        # self.edge_credit[node.from_node.name][node.name] += val
-        self.edge_credit[node.from_node][node] += val        
+        self.edge_credit[node.from_node.name][node.name] += val
         if self.verbose:
             print(f"assign {val} credits to {node.from_node}->{node}")
         self.credit(node.from_node, val) # propagate upward
@@ -198,15 +168,18 @@ class CreditFlow:
         '''
         run shap flow algorithm to fairly allocate credit
         '''
-
-        sources = get_source_nodes(graph)
-        for i in range(self.nruns): # random sample valid timelines
+        # run topological sort
+        for i in range(self.nruns): # random sample number of valid timelines
             # make value back to baseline
             graph.reset()
 
-            order = list(np.random.permutation(sources))
-            if self.verbose:
-                print(f"\n----> using order {order}")
+            order = topo_sort(graph)
+            if len(order) != len(graph):
+                print("order cannot be satisfied")
+                return
+            else:
+                if self.verbose:
+                    print(f"using order {order}")
 
             if self.verbose:
                 print("baselines " +\
@@ -215,7 +188,7 @@ class CreditFlow:
             # follow the order
             for node in order:
                 if self.verbose:
-                    print(f"turn on node {node} from {node.val} to {node.target}")
+                    print(f"turn on node {node} form {node.val} to {node.target}")
                 node.last_val = node.val # update last val
                 node.val = node.target # turn on the node
                 node.from_node = None # turn off the source
@@ -225,7 +198,11 @@ class CreditFlow:
     def print_credit(self):
         for node1, d in self.edge_credit.items():
             for node2, val in d.items():
-                print(f'credit {node1}->{node2}: {val/self.nruns}')
+                if node1 ==  node2:
+                    # additive noise term
+                    print(f'credit {node1}_noise->{node2}: {val/self.nruns}')
+                else:
+                    print(f'credit {node1}->{node2}: {val/self.nruns}')
 
     def credit2dot(self):
         '''
@@ -241,40 +218,28 @@ class CreditFlow:
             for node2, val in d.items():
                 w = val/self.nruns
                 edge_label = "{:.2f}".format(w)
+                if w != 0:
 
-                color = "orange" if w == 0 else "black"
-                width = 1 if w == 0 else abs(w)
-
-                if node1.is_noise_node:
-                    G.add_node(node1, shape="point")
-                    G.add_edge(node1, node2, weight=w, penwidth=width,
-                               color=color,
+                    if node1 == node2:
+                        node = node1 + "_noise"
+                        if node not in G:
+                            G.add_node(node, shape="point")
+                        G.add_edge(node, node2, weight=w, penwidth=abs(w),
+                                   label=edge_label)
+                        continue
+                    
+                    if node1 not in G:
+                        G.add_node(node1)                    
+                    
+                    if node2 not in G:
+                        G.add_node(node2)                        
+                    
+                    G.add_edge(node1, node2, weight=w, penwidth=abs(w),
                                label=edge_label)
-                    continue
-
-                if node1 not in G:
-                    G.add_node(node1, label=\
-                               f"{node1} {node1.target}/{node1.baseline}") 
-
-                if node2 not in G:
-                    G.add_node(node2, label=\
-                               f"{node2} {node2.target}/{node2.baseline}")
-
-                G.add_edge(node1, node2, weight=w, penwidth=width,
-                           color=color,
-                           label=edge_label)
 
         return nx.nx_pydot.to_pydot(G)
-
-def get_source_nodes(graph):
-    indegrees = dict((node, len(node.args)) for node in graph)
-    sources = [node for node in graph if indegrees[node] == 0]
-    return sources
-
+    
 def topo_sort(graph):
-    '''
-    topological sort of a graph
-    '''
     order = []
     indegrees = dict((node, len(node.args)) for node in graph)
     sources = [node for node in graph if indegrees[node] == 0]
@@ -287,6 +252,21 @@ def topo_sort(graph):
             if indegrees[u] == 0:
                 sources.append(u)
     return order
+
+def check_baseline_target(graph):
+    ''' graph is a list of nodes '''
+    n_targets = 0
+    for node in graph:
+        if node.is_target_node: n_targets += 1
+        if len(node.args) > 0:
+            residue = node.baseline - node.f(*[arg.baseline for arg in node.args])
+            if residue != 0:
+                print(f"baseline additive noise for {node} is {residue}")    
+            
+            residue = node.target - node.f(*[arg.target for arg in node.args])
+            if residue != 0:
+                print(f"outcome additive noise for {node} is {residue}")
+    assert n_targets == 1, f"{n_targets} target node, need 1"
 
 # sample graph
 def build_graph():
@@ -305,6 +285,8 @@ def build_graph():
                   # target to explain
                   {'x1': 1, 'x2': 1.5, 'target': 2.5})
     
+    # check the amount of noise
+    check_baseline_target(graph)
     return graph
 
 # sample runs
