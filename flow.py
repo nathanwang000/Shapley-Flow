@@ -25,7 +25,7 @@ class GraphIterator:
 class Graph:
     '''list of nodes'''
     def __init__(self, nodes, baseline_sampler, target_sampler,
-                 treat_target_differently=True, verbose=False):
+                 verbose=False):
         '''
         nodes: sequence of Node object
         baseline_sampler: a function ()->{name: val} where name
@@ -35,15 +35,10 @@ class Graph:
                         gives the current value
                         of the explanation instance; it can be
                         stochastic when noise of target is not observed
-
-        treat_target_differently: the baseline for target node is 
-                                  set using its function on other
-                                  node's baseline
         '''
         self.nodes = list(set(nodes))
         self.baseline_sampler = baseline_sampler
         self.target_sampler = target_sampler
-        self.treat_target_differently = treat_target_differently
         self.verbose = verbose
         self.reset()
 
@@ -54,63 +49,30 @@ class Graph:
         return GraphIterator(self)
     
     def reset(self):
+        # todo: only need baseline and target sampler to specify source node
         baseline_values = self.baseline_sampler()
         target_values = self.target_sampler()
-        
-        target_nodes = [] 
-        for node in self.nodes:
-            if node.is_target_node and self.treat_target_differently:
-                target_nodes.append(node)
-                continue
-            node.set_baseline_target(baseline_values[node.name],
-                                     target_values[node.name])
+
+        n_targets = 0
+        for node in topo_sort(self):
+            if len(node.args) == 0: # source node
+                node.set_baseline_target(baseline_values[node.name],
+                                         target_values[node.name])
+            else:
+                computed_baseline = node.f(*[arg.baseline for arg in node.args])
+                computed_target = node.f(*[arg.target for arg in node.args])
+                node.set_baseline_target(computed_baseline,
+                                         computed_target)
 
             for c in node.children: # only activated edges change visibility
                 c.visible_arg_values[node] = node.baseline
 
-        # set the target node value using its args
-        if self.treat_target_differently:
-            assert len(target_nodes) == 1, \
-                f"{len(target_nodes)} target node, need 1"
-            node = target_nodes[0]
-            node.set_baseline_target(node.f(*[arg.baseline for arg in node.args]),
-                                     node.f(*[arg.target for arg in node.args]))
-
-        self.check_baseline_target()
-
-    def check_baseline_target(self):
-        '''
-        check if baseline, target matches the functional form
-        '''
-        n_targets = 0
-        for node in topo_sort(self):
-            if node.is_target_node: n_targets += 1
-            if len(node.args) > 0:
-                computed_baseline = node.f(*[arg.baseline for arg in node.args])
-                computed_target = node.f(*[arg.target for arg in node.args])
-                
-                residue = node.baseline - computed_baseline
-                if residue != 0:
-
-                    if self.verbose:
-                        print(f"baseline for {node} has residue {residue}")
-                        print(f"enforcing baseline for {node}")
-                    node.set_baseline_target(computed_baseline,
-                                             computed_target)
-
-                residue = node.target - computed_target
-                if residue != 0:
-
-                    if self.verbose:
-                        print(f"outcome for {node} has residue {residue}")
-                        print(f"enforcing target for {node}")
-                    node.set_baseline_target(computed_baseline,
-                                             computed_target)
+            n_targets += node.is_target_node
 
         assert n_targets == 1, f"{n_targets} target node, need 1"
-            
-class Node:
 
+class Node:
+    '''models feature node as a computing function'''
     def __init__(self, name, f=None, args=[], children=[],
                  is_target_node=False, is_noise_node=False):
         '''
@@ -166,14 +128,16 @@ class Node:
         return self.name
 
 class CreditFlow:
-
-    def __init__(self, verbose=False, nruns=10, visualize=False):
+    ''' the main algorithm to get a flow of information '''
+    def __init__(self, graph, verbose=False, nruns=10, visualize=False):
         ''' 
+        graph: causal graph to explain
         verbose: whether to print out decision process        
         nruns: number of sampled valid timelines and permutations
         visualize: whether to visualize the graph build process, 
                    need to be verbose
         '''
+        self.graph = graph
         self.edge_credit = defaultdict(lambda: defaultdict(int))
         self.verbose = verbose
         self.nruns = nruns
@@ -190,7 +154,7 @@ class CreditFlow:
     def credit(self, node, val):
         if node is None or node.from_node is None:
             return
-            
+
         self.edge_credit[node.from_node][node] += val
         if self.verbose:
             print(f"assign {val} credits to {node.from_node}->{node}")
@@ -238,7 +202,7 @@ class CreditFlow:
                         self.dot.add_node(c)
                     dot_c = self.dot.get_node(c)
                     label = dot_c.attr['label']
-                    dot_c.attr['label'] = f"{label.split(':')[0]}: {c.val:.1f} ({c.target:.1f}/{c.baseline:.1f})"
+                    dot_c.attr['label'] = f"{label.split(':')[0]}: {c.val:.1f} ({c.baseline:.1f}->{c.target:.1f})"
                     dot_c_color = dot_c.attr['color']
                     if c.val != c.target:                    
                         dot_c.attr['color'] = 'orange'
@@ -258,21 +222,28 @@ class CreditFlow:
         for node in topo_sort(graph):
             if node not in dot:
                 dot.add_node(node,
-                             label=f"{node.name}: {node.val:.1f} ({node.target:.1f}/{node.baseline:.1f})")
+                             label=f"{node.name}: {node.val:.1f} ({node.baseline:.1f}->{node.target:.1f})")
             for p in node.args:
                 dot.add_edge(p, node)
-        return dot
+
+        self.dot = dot
+        self.viz_graph()
+
+    def reset(self):
+        '''reset the graph and initialize the visualization'''
+        self.graph.reset()
+        if self.visualize:
+            self.viz_graph_init(self.graph)
         
-    def run(self, graph):
+    def run(self):
         '''
         run shap flow algorithm to fairly allocate credit
         '''
-        sources = get_source_nodes(graph)
+        sources = get_source_nodes(self.graph)
         for i in range(self.nruns): # random sample valid timelines
-            # make value back to baseline
-            graph.reset()        
-            self.dot = self.viz_graph_init(graph)
-
+            # make value back to baselines
+            self.reset()
+            
             order = list(np.random.permutation(sources))
             if self.verbose:
                 print(f"\n----> using order {order}")
@@ -288,13 +259,13 @@ class CreditFlow:
                 node.from_node = None # turn off the source
 
                 if self.verbose:
-                    print(f"turn on node {node} from {node.val} to {node.target}")
+                    print(f"turn on node {node} from {node.last_val} to {node.val}")
                     if self.visualize:
                         if node not in self.dot:
                             self.dot.add_node(node)
                         dot_node = self.dot.get_node(node)
                         label = dot_node.attr['label']
-                        dot_node.attr['label'] = f"{label.split(':')[0]}: {node.val:.1f} ({node.target:.1f}/{node.baseline:.1f})"
+                        dot_node.attr['label'] = f"{label.split(':')[0]}: {node.val:.1f} ({node.baseline:.1f}->{node.target:.1f})"
                         dot_node_color = dot_node.attr['color']
                         dot_node.attr['color'] = 'green'
                         self.viz_graph()
@@ -335,11 +306,11 @@ class CreditFlow:
 
                 if node1 not in G:
                     G.add_node(node1, label=\
-                               f"{node1} {node1.target}/{node1.baseline}") 
+                               f"{node1} {node1.baseline}->{node1.target}") 
 
                 if node2 not in G:
                     G.add_node(node2, label=\
-                               f"{node2} {node2.target}/{node2.baseline}")
+                               f"{node2} {node2.baseline}->{node2.target}")
 
                 G.add_edge(node1, node2, weight=w, penwidth=width,
                            color=color,
@@ -347,6 +318,7 @@ class CreditFlow:
 
         return nx.nx_pydot.to_pydot(G)
 
+# helper functions
 def get_source_nodes(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
     sources = [node for node in graph if indegrees[node] == 0]
@@ -384,16 +356,16 @@ def build_graph():
                   # sample baseline
                   lambda: {'x1': 0, 'x2': 0, 'target': 0},
                   # target to explain
-                  {'x1': 1, 'x2': 1.5, 'target': 2.5})
+                  lambda: {'x1': 1, 'x2': 1.5, 'target': 2.5})
     
     return graph
 
 # sample runs
 def main():
 
-    cf = CreditFlow(verbose=False, nruns=1)
-    graph = build_graph()
-    cf.run(graph)
+    graph = build_graph()    
+    cf = CreditFlow(graph, verbose=False, nruns=1)
+    cf.run()
     cf.print_credit()
 
     return cf
