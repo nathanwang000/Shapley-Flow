@@ -143,6 +143,8 @@ class CreditFlow:
         self.nruns = nruns
         self.visualize = visualize
         self.dot = AGraph(directed=True)
+        self.penwidth_stress = 5
+        self.penwidth_normal = 1
 
     def viz_graph(self):
         ''' only applicable in ipython notebook setting 
@@ -166,7 +168,9 @@ class CreditFlow:
                 label = dot_edge.attr['label'] or '0'
                 dot_edge.attr['label'] = f"{label}+{val}"
                 dot_edge.attr['fontcolor'] = "blue"
+                dot_edge.attr['penwidth'] = self.penwidth_stress
                 self.viz_graph()
+                dot_edge.attr['penwidth'] = self.penwidth_normal                
                 dot_edge.attr['color'] = "black"
                 dot_edge.attr['fontcolor'] = "black"                
                 dot_edge.attr['label'] = eval(dot_edge.attr['label'])
@@ -181,36 +185,34 @@ class CreditFlow:
         children_order = np.random.permutation(node.children)
         for c in children_order:
 
+            c.from_node = node
+            c.last_val = c.val
+            c.visible_arg_values[node] = node.val
+            c.val = c.f(*[c.visible_arg_values[arg] for arg in c.args])
+
             if self.verbose:
-                print(f'turn on edge {node}->{c}')
+                print(f'turn on edge {node}->{c}')                
+                print(f'{c} changes from {c.last_val} to {c.val}')
                 if self.visualize:
                     if not self.dot.has_edge(node, c):
                         self.dot.add_edge(node, c)
                     dot_edge = self.dot.get_edge(node, c)
                     dot_edge.attr['color'] = "orange"
-                    self.viz_graph()
-                    dot_edge.attr['color'] = "black"
-                    
-            c.from_node = node
-            c.last_val = c.val
-            c.visible_arg_values[node] = node.val
-            c.val = c.f(*[c.visible_arg_values[arg] for arg in c.args])
-            if self.verbose:
-                print(f'{c} changes from {c.last_val} to {c.val}')
-                if self.visualize:
-                    if c not in self.dot:
-                        self.dot.add_node(c)
                     dot_c = self.dot.get_node(c)
                     label = dot_c.attr['label']
                     dot_c.attr['label'] = f"{label.split(':')[0]}: {c.val:.1f} ({c.baseline:.1f}->{c.target:.1f})"
                     dot_c_color = dot_c.attr['color']
-                    if c.val != c.target:                    
-                        dot_c.attr['color'] = 'orange'
-                    else:
-                        dot_c.attr['color'] = 'green'
+                    dot_edge.attr['penwidth'] = self.penwidth_stress
+                    dot_c.attr['penwidth'] = self.penwidth_stress
+                    dot_c.attr['color'] = 'orange'
                     self.viz_graph()
-                    if c.val != c.target:
+                    dot_edge.attr['penwidth'] = self.penwidth_normal
+                    dot_c.attr['penwidth'] = self.penwidth_normal
+                    dot_edge.attr['color'] = "black"
+                    if c.val == c.baseline:
                         dot_c.attr['color'] = dot_c_color or "black"
+                    elif c.val == c.target:
+                        dot_c.attr['color'] = "green"
                 
             self.dfs(c, order)
 
@@ -259,19 +261,24 @@ class CreditFlow:
                 node.from_node = None # turn off the source
 
                 if self.verbose:
-                    print(f"turn on node {node} from {node.last_val} to {node.val}")
+                    print(f"turn on edge from external source to {node}")
+                    print(f"{node} changes from {node.last_val} to {node.val}")
                     if self.visualize:
                         if node not in self.dot:
                             self.dot.add_node(node)
                         dot_node = self.dot.get_node(node)
                         label = dot_node.attr['label']
                         dot_node.attr['label'] = f"{label.split(':')[0]}: {node.val:.1f} ({node.baseline:.1f}->{node.target:.1f})"
+                        dot_node.attr['penwidth'] = self.penwidth_stress
                         dot_node_color = dot_node.attr['color']
-                        dot_node.attr['color'] = 'green'
+                        dot_node.attr['color'] = 'orange'
                         self.viz_graph()
-                        # no need to revert back b/c turn to green
-                        # means reaches its final value
-                
+                        dot_node.attr['penwidth'] = self.penwidth_normal
+                        if node.val == node.baseline:
+                            dot_node.attr['color'] = dot_node_color or "black"
+                        elif node.val == node.target:
+                            dot_node.attr['color'] = "green"
+                        
                 self.dfs(node, order)
 
     def print_credit(self):
