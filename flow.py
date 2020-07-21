@@ -313,11 +313,11 @@ class CreditFlow:
 
                 if node1 not in G:
                     G.add_node(node1, label=\
-                               f"{node1} {node1.baseline}->{node1.target}") 
+                               f"{node1}: {node1.target}") 
 
                 if node2 not in G:
                     G.add_node(node2, label=\
-                               f"{node2} {node2.baseline}->{node2.target}")
+                               f"{node2}: {node2.target}")
 
                 G.add_edge(node1, node2, weight=w, penwidth=width,
                            color=color,
