@@ -2,7 +2,7 @@
 
   Shapley value flow
   
-  Sample experiments in [[./flow1_synthetic_experiments.ipynb][notebook]]
+  Sample experiments in [[./flow_synthetic_experiments.ipynb][notebook]]
 
 ** versions
 
