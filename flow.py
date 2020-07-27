@@ -24,13 +24,12 @@ class GraphIterator:
 
 class Graph:
     '''list of nodes'''
-    def __init__(self, nodes, baseline_sampler, target_sampler,
-                 verbose=False):
+    def __init__(self, nodes, baseline_sampler, target_sampler):
         '''
         nodes: sequence of Node object
-        baseline_sampler: a function ()->{name: val} where name
+        baseline_sampler: {name: (lambda: val)} where name
                           point to a node in nodes
-        target_sampler: a function ()->{name: val} where name 
+        target_sampler: {name: (lambda: val)} where name 
                         point to a node in nodes
                         gives the current value
                         of the explanation instance; it can be
@@ -39,7 +38,6 @@ class Graph:
         self.nodes = list(set(nodes))
         self.baseline_sampler = baseline_sampler
         self.target_sampler = target_sampler
-        self.verbose = verbose
         self.reset()
 
     def __len__(self):
@@ -49,9 +47,8 @@ class Graph:
         return GraphIterator(self)
     
     def reset(self):
-        # todo: only need baseline and target sampler to specify source node
-        baseline_values = self.baseline_sampler()
-        target_values = self.target_sampler()
+        baseline_values = dict((key, f()) for key, f in self.baseline_sampler.items())
+        target_values = dict((key, f()) for key, f in self.target_sampler.items())
 
         n_targets = 0
         for node in topo_sort(self):
@@ -286,7 +283,7 @@ class CreditFlow:
             for node2, val in d.items():
                 print(f'credit {node1}->{node2}: {val/self.nruns}')
 
-    def credit2dot(self):
+    def credit2dot(self, format_str="{:.2f}"):
         '''
         convert the graph to pydot graph for visualization:
         e.g. 
@@ -299,7 +296,7 @@ class CreditFlow:
         for node1, d in self.edge_credit.items():
             for node2, val in d.items():
                 w = val/self.nruns
-                edge_label = "{:.2f}".format(w)
+                edge_label = format_str.format(w)
 
                 color = "orange" if w == 0 else "black"
                 width = 1 if w == 0 else abs(w)
@@ -348,6 +345,43 @@ def topo_sort(graph):
                 sources.append(u)
     return order
 
+def node_function(f, node):
+    '''
+    helper function to record node in context
+    f: function Node -> val
+    '''
+    def f_():
+        return f(node)
+    return f_
+
+def flatten_graph(graph):
+    '''
+    given a graph, return a graph with the graph flattened
+    '''
+    graph = copy.deepcopy(graph)
+    for node in topo_sort(graph):
+
+        if not node.is_target_node:
+            if node.args != []:
+                
+                for arg in node.args: # remove parent's link to this node
+                    idx = arg.children.index(node)
+                    arg.children = arg.children[:idx] + arg.children[idx+1:]
+                
+                node.spare_args = node.args
+                node.args = [] # remove this node's link to parent
+                
+                graph.baseline_sampler[node.name] = node_function(lambda node:\
+                                                                  node.f(*[graph.baseline_sampler[arg.name]()\
+                                                                           for arg in node.spare_args]),
+                                                                  node)
+                graph.target_sampler[node.name] = node_function(lambda node:\
+                                                                node.f(*[graph.target_sampler[arg.name]()\
+                                                                         for arg in node.spare_args]),
+                                                                node)
+                
+    return graph
+
 # sample graph
 def build_graph():
     '''
@@ -361,9 +395,9 @@ def build_graph():
     # initialize the values from data: now is just specified
     graph = Graph([x1, x2, y],
                   # sample baseline
-                  lambda: {'x1': 0, 'x2': 0, 'target': 0},
+                  {'x1': lambda: 0},
                   # target to explain
-                  lambda: {'x1': 1, 'x2': 1.5, 'target': 2.5})
+                  {'x1': lambda: 1})
     
     return graph
 
