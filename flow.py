@@ -502,6 +502,28 @@ def boundary_graph(graph, boundary_nodes=[]):
 
     return Graph(nodes, graph.baseline_sampler, graph.target_sampler)
 
+def single_source_graph(graph):
+    '''
+    check if a graph has a single source. If not,
+    add an artificial source node
+    '''
+    graph = copy.deepcopy(graph)
+    sources = get_source_nodes(graph)
+    if len(sources) == 1:
+        return graph
+    
+    s = Node('seed', is_noise_node=True)
+    for node in sources:
+        node.add_arg(s)
+        node.f = lambda s: graph.baseline_sampler[node.name]() if s==0 else\
+            graph.target_sampler[node.name]()
+
+    graph.baseline_sampler[s.name] = lambda: 0
+    graph.target_sampler[s.name] = lambda: 1
+    graph.nodes.append(s)
+    graph.reset()
+    return graph
+    
 # sample graph
 def build_graph():
     '''
