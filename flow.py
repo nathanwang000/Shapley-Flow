@@ -47,8 +47,10 @@ class Graph:
         return GraphIterator(self)
     
     def reset(self):
-        baseline_values = dict((key, f()) for key, f in self.baseline_sampler.items())
-        target_values = dict((key, f()) for key, f in self.target_sampler.items())
+        baseline_values = dict((key, f()) for key, f \
+                               in self.baseline_sampler.items())
+        target_values = dict((key, f()) for key, f \
+                             in self.target_sampler.items())
 
         n_targets = 0
         for node in topo_sort(self):
@@ -70,7 +72,7 @@ class Graph:
 
 class Node:
     '''models feature node as a computing function'''
-    def __init__(self, name, f=None, args=[], children=[],
+    def __init__(self, name, f=None, args=[],
                  is_target_node=False, is_noise_node=False):
         '''
         name: name of the node
@@ -94,9 +96,7 @@ class Node:
         for arg in args:
             self.add_arg(arg)
             
-        self.children = []
-        for c in children:
-            self.add_child(c)
+        self.children = [] # inferred from args
         
     def set_baseline_target(self, baseline, target):
         self.target = target
@@ -108,19 +108,10 @@ class Node:
         self.from_node = None
         
     def add_arg(self, node):
-        '''add predecessor'''
-        if node not in self.args:
-            self.args.append(node)
-        if self not in node.children:
-            node.children.append(self)
+        '''add predecessor, allow multi edge'''
+        self.args.append(node)
+        node.children.append(self)            
         
-    def add_child(self, node):
-        '''add children'''
-        if node not in self.children:
-            self.children.append(node)
-        if self not in node.args:
-            node.args.append(self)
-
     def __repr__(self):
         return self.name
 
@@ -382,6 +373,16 @@ def flatten_graph(graph):
                 
     return graph
 
+def eval_graph(graph, val_dict):
+    for node in topo_sort(graph):
+        if node.name in val_dict:
+            node.val = val_dict[node.name]
+        else:
+            node.val = node.f(*[a.val for a in node.args])
+
+        if node.is_target_node:
+            return node.val
+        
 # sample graph
 def build_graph():
     '''
