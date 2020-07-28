@@ -73,7 +73,8 @@ class Graph:
 class Node:
     '''models feature node as a computing function'''
     def __init__(self, name, f=None, args=[],
-                 is_target_node=False, is_noise_node=False):
+                 is_target_node=False, is_noise_node=False,
+                 is_dummy_node=False):
         '''
         name: name of the node
         f: functional form of this variable on other variables
@@ -83,11 +84,17 @@ class Node:
         baseline: baseline value
         is_target_node: is this node to explain
         is_noise_node: is this node a noise node
+        is_dummy_node: is this a dummy node 
+                       a dummy node is a node that has one parent and
+                       one children that shouldn't be drawn
+                       but are in place to support multigraph and
+                       graph folding
         '''
         self.name = name
         self.f = f
         self.is_target_node = is_target_node
         self.is_noise_node = is_noise_node
+        self.is_dummy_node = is_dummy_node
 
         # arg values that are visible to the node
         self.visible_arg_values = {}
@@ -274,6 +281,7 @@ class CreditFlow:
             for node2, val in d.items():
                 print(f'credit {node1}->{node2}: {val/self.nruns}')
 
+
     def credit2dot(self, format_str="{:.2f}"):
         '''
         convert the graph to pydot graph for visualization:
@@ -283,9 +291,23 @@ class CreditFlow:
         G.write_png("graph.png")
         Image(G.png)
         '''
-        G = nx.DiGraph()
+        G = nx.MultiDiGraph()
+        edge_credit = defaultdict(lambda: defaultdict(int))
+
+        # simplify for dummy intermediate node for multi-graph
         for node1, d in self.edge_credit.items():
             for node2, val in d.items():
+                w = val
+                if node1.is_dummy_node:
+                    continue # should be covered in the next case
+                if node2.is_dummy_node:
+                    node2 = node2.children[0]
+                edge_credit[node1][node2] += w                    
+                
+        # regular graph
+        for node1, d in edge_credit.items():
+            for node2, val in d.items():
+                
                 w = val/self.nruns
                 edge_label = format_str.format(w)
 
@@ -298,6 +320,12 @@ class CreditFlow:
                                color=color,
                                label=edge_label)
                     continue
+
+                if node1.is_dummy_node:
+                    continue # should be covered in the next case
+
+                if node2.is_dummy_node:
+                    node2 = node2.children[0]
 
                 if node1 not in G:
                     G.add_node(node1, label=\
@@ -312,7 +340,7 @@ class CreditFlow:
                            label=edge_label)
 
         return nx.nx_pydot.to_pydot(G)
-
+                
 # helper functions
 def get_source_nodes(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
@@ -336,19 +364,20 @@ def topo_sort(graph):
                 sources.append(u)
     return order
 
-def node_function(f, node):
-    '''
-    helper function to record node in context
-    f: function Node -> val
-    '''
-    def f_():
-        return f(node)
-    return f_
-
 def flatten_graph(graph):
     '''
     given a graph, return a graph with the graph flattened
     '''
+
+    def node_function(f, node):
+        '''
+        helper function to record node in context
+        f: function Node -> val
+        '''
+        def f_():
+            return f(node)
+        return f_
+
     graph = copy.deepcopy(graph)
     for node in topo_sort(graph):
 
@@ -383,6 +412,96 @@ def eval_graph(graph, val_dict):
         if node.is_target_node:
             return node.val
         
+def merge_h(node1, node2):
+    '''assume node 1 depend on node2, otherwise return node1
+    helper function for merge_nodes'''
+    if node2 in node1.args:
+
+        def create_f(node1, node2):
+            def f(*args):
+                node2_args, node1_args = args[:len(node2.args)], args[len(node2.args):]
+                v = node2.f(*node2_args)
+                args = []
+                idx = 0
+                for a in node1.args:
+                    if a.name == node2.name:
+                        args.append(v)
+                    else:
+                        args.append(node1_args[idx])
+                        idx += 1
+                return node1.f(*args)
+            return f
+
+        args = node2.args + [a for a in node1.args if a.name != node2.name]
+        node1 = Node(node1.name, create_f(node1, node2), args)
+
+    return node1
+
+def merge_nodes(nodes):
+    '''
+    nodes: assume nodes follow topological order, with the last being the target
+    helper function for boundary_graph
+    '''
+    y = nodes[-1]
+    assert y.is_target_node, "assumes last one is the target"
+    for node in nodes[:-1][::-1]:
+        y = merge_h(y, node)
+        y.is_target_node = True
+    
+    # rewire parents: add dumminess to work with multi graph
+    dummy_nodes = [Node(arg.name + '_dummy{}'.format(i), lambda x: x, [arg],
+                        is_dummy_node=True) for i, arg in enumerate(y.args)]
+    y.args = dummy_nodes
+    
+    for node in dummy_nodes:
+        node.children = [y]
+            
+    # remove link to old node
+    for node in dummy_nodes:
+        for parent in node.args:
+            for n in nodes:
+                parent.children = [c for c in parent.children if c.name != n.name]
+    
+    return y, dummy_nodes
+        
+def boundary_graph(graph, boundary_nodes=[]):
+    '''
+    boundary nodes are names of nodes on the boundary
+    we collapse all model nodes into a single node
+    default just use the source nodes
+    '''
+    graph = copy.deepcopy(graph)
+    
+    # find the boundary node's ancestor and include it in the graph with dfs
+    boundary_nodes = [node for node in graph if node.name in boundary_nodes] + get_source_nodes(graph)
+    visited = set()
+    def dfs(node):
+        if node in visited: return
+        visited.add(node)
+        for n in node.args:
+            dfs(n)
+    
+    for node in boundary_nodes:
+        dfs(node)
+    boundary_nodes = visited
+    
+    # group C = (D, M)
+    nodes_in_d = [] # data side
+    nodes_to_merge = []
+    for node in topo_sort(graph):
+        if node not in boundary_nodes:
+            nodes_to_merge.append(node)
+            if node.is_target_node:
+                break
+        else:
+            nodes_in_d.append(node)
+    
+    # merge node in M
+    node, dummy_nodes = merge_nodes(nodes_to_merge)
+    nodes = nodes_in_d + [node] + dummy_nodes
+
+    return Graph(nodes, graph.baseline_sampler, graph.target_sampler)
+
 # sample graph
 def build_graph():
     '''
