@@ -515,8 +515,14 @@ def single_source_graph(graph):
     s = Node('seed', is_noise_node=True)
     for node in sources:
         node.add_arg(s)
-        node.f = lambda s: graph.baseline_sampler[node.name]() if s==0 else\
-            graph.target_sampler[node.name]()
+        
+        def create_f(graph):
+            def f(s):
+                return graph.baseline_sampler[node.name]() if s==0 else\
+                    graph.target_sampler[node.name]()
+            return f
+        
+        node.f = create_f(graph)
 
     graph.baseline_sampler[s.name] = lambda: 0
     graph.target_sampler[s.name] = lambda: 1
