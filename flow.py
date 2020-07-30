@@ -141,13 +141,6 @@ class CreditFlow:
         self.penwidth_stress = 5
         self.penwidth_normal = 1
 
-    def viz_graph(self):
-        ''' only applicable in ipython notebook setting 
-        convert self.dot to graphviz format and display with 
-        ipython display
-        '''
-        display(Source(self.dot.string()))
-        
     def credit(self, node, val):
         if node is None or node.from_node is None:
             return
@@ -164,7 +157,7 @@ class CreditFlow:
                 dot_edge.attr['label'] = f"{label}+{val}"
                 dot_edge.attr['fontcolor'] = "blue"
                 dot_edge.attr['penwidth'] = self.penwidth_stress
-                self.viz_graph()
+                viz_graph(self.dot)
                 dot_edge.attr['penwidth'] = self.penwidth_normal                
                 dot_edge.attr['color'] = "black"
                 dot_edge.attr['fontcolor'] = "black"                
@@ -200,7 +193,7 @@ class CreditFlow:
                     dot_edge.attr['penwidth'] = self.penwidth_stress
                     dot_c.attr['penwidth'] = self.penwidth_stress
                     dot_c.attr['color'] = 'orange'
-                    self.viz_graph()
+                    viz_graph(self.dot)
                     dot_edge.attr['penwidth'] = self.penwidth_normal
                     dot_c.attr['penwidth'] = self.penwidth_normal
                     dot_edge.attr['color'] = "black"
@@ -224,7 +217,7 @@ class CreditFlow:
                 dot.add_edge(p, node)
 
         self.dot = dot
-        self.viz_graph()
+        viz_graph(self.dot)
 
     def reset(self):
         '''reset the graph and initialize the visualization'''
@@ -267,7 +260,7 @@ class CreditFlow:
                         dot_node.attr['penwidth'] = self.penwidth_stress
                         dot_node_color = dot_node.attr['color']
                         dot_node.attr['color'] = 'orange'
-                        self.viz_graph()
+                        viz_graph(self.dot)
                         dot_node.attr['penwidth'] = self.penwidth_normal
                         if node.val == node.baseline:
                             dot_node.attr['color'] = dot_node_color or "black"
@@ -282,29 +275,61 @@ class CreditFlow:
                 print(f'credit {node1}->{node2}: {val/self.nruns}')
 
 
-    def credit2dot(self, format_str="{:.2f}"):
+    def credit2dot_pygraphviz(self, edge_credit, format_str):
         '''
-        convert the graph to pydot graph for visualization:
-        e.g. 
-        from IPython.display import Image
-        G = self.credit2dot()
-        G.write_png("graph.png")
-        Image(G.png)
+        pygraphviz version of credit2dot
         '''
-        G = nx.MultiDiGraph()
-        edge_credit = defaultdict(lambda: defaultdict(int))
-
-        # simplify for dummy intermediate node for multi-graph
-        for node1, d in self.edge_credit.items():
+        G = AGraph(directed=True)
+        for node1, d in edge_credit.items():
             for node2, val in d.items():
-                w = val
+                
+                w = val/self.nruns
+                edge_label = format_str.format(w)
+
+                color = "orange" if w == 0 else "black"
+                width = 1 if w == 0 else abs(w)
+
+                if node1.is_noise_node:
+                    G.add_node(node1, shape="point")
+                    G.add_edge(node1, node2)
+                    e = G.get_edge(node1, node2)
+                    e.attr["weight"] = w
+                    e.attr["penwidth"] = width
+                    e.attr["color"] = color
+                    e.attr["label"] = edge_label
+                    continue
+
                 if node1.is_dummy_node:
                     continue # should be covered in the next case
+
                 if node2.is_dummy_node:
                     node2 = node2.children[0]
-                edge_credit[node1][node2] += w                    
-                
-        # regular graph
+
+                if node1 not in G:
+                    G.add_node(node1, label=\
+                               ("{}: "+format_str).format(node1,
+                                                         node1.target)) 
+
+                if node2 not in G:
+                    G.add_node(node2, label=\
+                               ("{}: "+format_str).format(node2,
+                                                         node2.target)) 
+
+                G.add_edge(node1, node2)
+                e = G.get_edge(node1, node2)                
+                e.attr["weight"] = w
+                e.attr["penwidth"] = width
+                e.attr["color"] = color
+                e.attr["label"] = edge_label
+
+        return G
+        
+    def credit2dot_pydot(self, edge_credit, format_str):
+        '''
+        DEPRECATED
+        pydot version of credit2dot
+        '''
+        G = nx.MultiDiGraph()        
         for node1, d in edge_credit.items():
             for node2, val in d.items():
                 
@@ -329,19 +354,58 @@ class CreditFlow:
 
                 if node1 not in G:
                     G.add_node(node1, label=\
-                               f"{node1}: {node1.target}") 
+                               ("{}: "+format_str).format(node1,
+                                                         node1.target)) 
 
                 if node2 not in G:
                     G.add_node(node2, label=\
-                               f"{node2}: {node2.target}")
+                               ("{}: "+format_str).format(node2,
+                                                         node2.target)) 
 
                 G.add_edge(node1, node2, weight=w, penwidth=width,
                            color=color,
                            label=edge_label)
 
         return nx.nx_pydot.to_pydot(G)
+        
+    def credit2dot(self, format_str="{:.2f}"):
+        '''
+        convert the graph to pydot graph for visualization:
+        e.g. 
+        from IPython.display import Image
+        G = self.credit2dot()
+        G.write_png("graph.png")
+        Image(G.png)
+        '''
+        edge_credit = defaultdict(lambda: defaultdict(int))
+
+        # simplify for dummy intermediate node for multi-graph
+        for node1, d in self.edge_credit.items():
+            for node2, val in d.items():
+                if node1.is_dummy_node:
+                    continue # should be covered in the next case
+                if node2.is_dummy_node:
+                    node2 = node2.children[0]
+                edge_credit[node1][node2] += val
+
+        return self.credit2dot_pygraphviz(edge_credit, format_str)
                 
 # helper functions
+def viz_graph(G):
+    '''only applicable in ipython notebook setting 
+    convert G (pygraphviz) to graphviz format and display with 
+    ipython display
+    '''
+    display(Source(G.string()))
+
+def save_graph(G, name):
+    '''
+    G is a pygraphviz object;
+    save G to a file with name
+    '''
+    G.layout(prog='dot')
+    G.draw(name)
+    
 def get_source_nodes(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
     sources = [node for node in graph if indegrees[node] == 0]
