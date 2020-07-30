@@ -324,50 +324,6 @@ class CreditFlow:
 
         return G
         
-    def credit2dot_pydot(self, edge_credit, format_str):
-        '''
-        DEPRECATED
-        pydot version of credit2dot
-        '''
-        G = nx.MultiDiGraph()        
-        for node1, d in edge_credit.items():
-            for node2, val in d.items():
-                
-                w = val/self.nruns
-                edge_label = format_str.format(w)
-
-                color = "orange" if w == 0 else "black"
-                width = 1 if w == 0 else abs(w)
-
-                if node1.is_noise_node:
-                    G.add_node(node1, shape="point")
-                    G.add_edge(node1, node2, weight=w, penwidth=width,
-                               color=color,
-                               label=edge_label)
-                    continue
-
-                if node1.is_dummy_node:
-                    continue # should be covered in the next case
-
-                if node2.is_dummy_node:
-                    node2 = node2.children[0]
-
-                if node1 not in G:
-                    G.add_node(node1, label=\
-                               ("{}: "+format_str).format(node1,
-                                                         node1.target)) 
-
-                if node2 not in G:
-                    G.add_node(node2, label=\
-                               ("{}: "+format_str).format(node2,
-                                                         node2.target)) 
-
-                G.add_edge(node1, node2, weight=w, penwidth=width,
-                           color=color,
-                           label=edge_label)
-
-        return nx.nx_pydot.to_pydot(G)
-        
     def credit2dot(self, format_str="{:.2f}"):
         '''
         convert the graph to pydot graph for visualization:
@@ -390,7 +346,8 @@ class CreditFlow:
 
         return self.credit2dot_pygraphviz(edge_credit, format_str)
                 
-# helper functions
+##### helper functions
+# graph visualization
 def viz_graph(G):
     '''only applicable in ipython notebook setting 
     convert G (pygraphviz) to graphviz format and display with 
@@ -405,7 +362,7 @@ def save_graph(G, name):
     '''
     G.layout(prog='dot')
     G.draw(name)
-    
+# graph algorithm
 def get_source_nodes(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
     sources = [node for node in graph if indegrees[node] == 0]
@@ -428,6 +385,7 @@ def topo_sort(graph):
                 sources.append(u)
     return order
 
+# graph operation
 def flatten_graph(graph):
     '''
     given a graph, return a graph with the graph flattened
@@ -475,7 +433,7 @@ def eval_graph(graph, val_dict):
 
         if node.is_target_node:
             return node.val
-        
+
 def merge_h(node1, node2):
     '''assume node 1 depend on node2, otherwise return node1
     helper function for merge_nodes'''
@@ -593,7 +551,7 @@ def single_source_graph(graph):
     graph.nodes.append(s)
     graph.reset()
     return graph
-    
+
 # sample graph
 def build_graph():
     '''
