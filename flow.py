@@ -24,7 +24,8 @@ class GraphIterator:
 
 class Graph:
     '''list of nodes'''
-    def __init__(self, nodes, baseline_sampler, target_sampler):
+    def __init__(self, nodes, baseline_sampler, target_sampler,
+                 display_translator={}):
         '''
         nodes: sequence of Node object
         baseline_sampler: {name: (lambda: val)} where name
@@ -34,10 +35,15 @@ class Graph:
                         gives the current value
                         of the explanation instance; it can be
                         stochastic when noise of target is not observed
+        display_translator: {name: lamda val: translated val}
+                            translate value to human readable
         '''
         self.nodes = list(set(nodes))
         self.baseline_sampler = baseline_sampler
         self.target_sampler = target_sampler
+        self.display_translator = defaultdict(lambda: (lambda x: x) )
+        for k, v in display_translator.items():
+            self.display_translator[k] = v
         self.reset()
 
     def __len__(self):
@@ -53,7 +59,7 @@ class Graph:
                              in self.target_sampler.items())
 
         n_targets = 0
-        for node in topo_sort(self):
+        for node in topo_sort(self): # todo: could optimize to be faster
             if len(node.args) == 0: # source node
                 node.set_baseline_target(baseline_values[node.name],
                                          target_values[node.name])
@@ -311,9 +317,14 @@ class CreditFlow:
                         if node.is_noise_node:
                             G.add_node(node, shape="point")
                         else:
+                            txt = self.graph.display_translator\
+                                [node.name](node.target)
+                            if type(txt) is str:
+                                fmt = "{}: {}"
+                            else:
+                                fmt = "{}: " + format_str
                             G.add_node(node, label=\
-                                   ("{}: "+format_str).format(node,
-                                                              node.target)) 
+                                   fmt.format(node, txt))
 
                 G.add_edge(node1, node2)
                 e = G.get_edge(node1, node2)                
