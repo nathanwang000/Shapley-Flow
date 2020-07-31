@@ -557,13 +557,14 @@ def single_source_graph(graph):
     graph.reset()
     return graph
 
-def hcluster_graph(graph, cluster_matrix, verbose=False):
+def hcluster_graph(graph, source_names, cluster_matrix, verbose=False):
     '''
     cluster_matrix: of form https://docs.scipy.org/doc/scipy/reference/generated/scipy.cluster.hierarchy.linkage.html#scipy.cluster.hierarchy.linkage
+    source_names: name of the source nodes
     graph: a flat graph with input features
     '''
     graph = copy.deepcopy(graph)
-    nodes = get_source_nodes(graph)
+    nodes = sorted(get_source_nodes(graph), key=lambda node: source_names.index(node.name))
     for row in cluster_matrix:
         node1 = nodes[int(row[0])]
         node2 = nodes[int(row[1])]
