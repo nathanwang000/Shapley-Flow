@@ -280,48 +280,53 @@ class CreditFlow:
         pygraphviz version of credit2dot
         '''
         G = AGraph(directed=True)
+
+        max_v = 0
+        for node1, d in edge_credit.items():
+            for node2, val in d.items():
+                max_v = max(abs(val/self.nruns), max_v)
+        
         for node1, d in edge_credit.items():
             for node2, val in d.items():
                 
-                w = val/self.nruns
-                edge_label = format_str.format(w)
+                v = val/self.nruns
+                edge_label = format_str.format(v)
 
-                color = "orange" if w == 0 else "black"
-                width = 1 if w == 0 else abs(w)
-
-                if node1.is_noise_node:
-                    G.add_node(node1, shape="point")
-                    G.add_edge(node1, node2)
-                    e = G.get_edge(node1, node2)
-                    e.attr["weight"] = w
-                    e.attr["penwidth"] = width
-                    e.attr["color"] = color
-                    e.attr["label"] = edge_label
-                    continue
-
+                red = "#ff0051"
+                blue = "#008bfb"
+                color = f"{blue}ff" if v < 0 else f"{red}ff" # blue and red
+                
+                max_w = 5
+                min_w = 0.05
+                width = abs(v) / max_v * (max_w - min_w) + min_w
+                
                 if node1.is_dummy_node:
                     continue # should be covered in the next case
 
                 if node2.is_dummy_node:
                     node2 = node2.children[0]
 
-                if node1 not in G:
-                    G.add_node(node1, label=\
-                               ("{}: "+format_str).format(node1,
-                                                         node1.target)) 
-
-                if node2 not in G:
-                    G.add_node(node2, label=\
-                               ("{}: "+format_str).format(node2,
-                                                         node2.target)) 
+                for node in [node1, node2]:
+                    if node not in G:
+                        if node.is_noise_node:
+                            G.add_node(node, shape="point")
+                        else:
+                            G.add_node(node, label=\
+                                   ("{}: "+format_str).format(node,
+                                                              node.target)) 
 
                 G.add_edge(node1, node2)
                 e = G.get_edge(node1, node2)                
-                e.attr["weight"] = w
+                e.attr["weight"] = v
                 e.attr["penwidth"] = width
                 e.attr["color"] = color
                 e.attr["label"] = edge_label
-
+                min_c, max_c = 60, 255
+                alpha = "{:0>2}".format(hex(
+                    int(abs(v) / max_v * (max_c - min_c) + min_c)
+                )[2:]) # skip 0x
+                e.attr["fontcolor"] = f"{blue}{alpha}" if v < 0 else\
+                    f"{red}{alpha}"
         return G
         
     def credit2dot(self, format_str="{:.2f}"):
