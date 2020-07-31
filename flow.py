@@ -130,13 +130,15 @@ class Node:
 
 class CreditFlow:
     ''' the main algorithm to get a flow of information '''
-    def __init__(self, graph, verbose=False, nruns=10, visualize=False):
+    def __init__(self, graph, verbose=False, nruns=10,
+                 visualize=False, fold_noise=True):
         ''' 
         graph: causal graph to explain
         verbose: whether to print out decision process        
         nruns: number of sampled valid timelines and permutations
         visualize: whether to visualize the graph build process, 
                    need to be verbose
+        fold_noise: whether to show noise node as a point
         '''
         self.graph = graph
         self.edge_credit = defaultdict(lambda: defaultdict(int))
@@ -146,6 +148,7 @@ class CreditFlow:
         self.dot = AGraph(directed=True)
         self.penwidth_stress = 5
         self.penwidth_normal = 1
+        self.fold_noise = fold_noise
 
     def credit(self, node, val):
         if node is None or node.from_node is None:
@@ -314,7 +317,7 @@ class CreditFlow:
 
                 for node in [node1, node2]:
                     if node not in G:
-                        if node.is_noise_node:
+                        if node.is_noise_node and self.fold_noise:
                             G.add_node(node, shape="point")
                         else:
                             txt = self.graph.display_translator\
