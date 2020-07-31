@@ -543,17 +543,50 @@ def single_source_graph(graph):
     for node in sources:
         node.add_arg(s)
         
-        def create_f(graph):
+        def create_f(graph, node):
             def f(s):
                 return graph.baseline_sampler[node.name]() if s==0 else\
                     graph.target_sampler[node.name]()
             return f
         
-        node.f = create_f(graph)
+        node.f = create_f(graph, node)
 
     graph.baseline_sampler[s.name] = lambda: 0
     graph.target_sampler[s.name] = lambda: 1
     graph.nodes.append(s)
+    graph.reset()
+    return graph
+
+def hcluster_graph(graph, cluster_matrix, verbose=False):
+    '''
+    cluster_matrix: of form https://docs.scipy.org/doc/scipy/reference/generated/scipy.cluster.hierarchy.linkage.html#scipy.cluster.hierarchy.linkage
+    graph: a flat graph with input features
+    '''
+    graph = copy.deepcopy(graph)
+    nodes = get_source_nodes(graph)
+    for row in cluster_matrix:
+        node1 = nodes[int(row[0])]
+        node2 = nodes[int(row[1])]
+        if verbose:
+            print(f'merging {node1} and {node2} with dist {row[2]} and {row[3]} elements')
+        s = Node(f"{node1} x {node2}", is_noise_node=True)
+        node1.add_arg(s)
+        node2.add_arg(s)
+        
+        def create_f(graph, node):
+            def f(s):
+                return graph.baseline_sampler[node.name]() if s==0 else\
+                    graph.target_sampler[node.name]()
+            return f
+
+        node1.f = create_f(graph, node1)
+        node2.f = create_f(graph, node2)
+
+        graph.baseline_sampler[s.name] = lambda: 0
+        graph.target_sampler[s.name] = lambda: 1
+        graph.nodes.append(s)
+        nodes.append(s)
+        
     graph.reset()
     return graph
 
