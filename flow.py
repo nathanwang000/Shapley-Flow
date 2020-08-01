@@ -44,8 +44,13 @@ class Graph:
         self.display_translator = defaultdict(lambda: (lambda x: x) )
         for k, v in display_translator.items():
             self.display_translator[k] = v
-        self.reset()
 
+    def add_node(self, node):
+        '''
+        add a node to nodes
+        '''
+        self.nodes.append(node)
+        
     def __len__(self):
         return len(self.nodes)
 
@@ -53,13 +58,14 @@ class Graph:
         return GraphIterator(self)
     
     def reset(self):
+        # todo: rewrite with batch version
         baseline_values = dict((key, f()) for key, f \
                                in self.baseline_sampler.items())
         target_values = dict((key, f()) for key, f \
                              in self.target_sampler.items())
 
         n_targets = 0
-        for node in topo_sort(self): # todo: could optimize to be faster
+        for node in topo_sort(self):
             if len(node.args) == 0: # source node
                 node.set_baseline_target(baseline_values[node.name],
                                          target_values[node.name])
@@ -238,6 +244,7 @@ class CreditFlow:
         '''
         run shap flow algorithm to fairly allocate credit
         '''
+        # todo: rewrite for batch version
         sources = get_source_nodes(self.graph)
         for i in range(self.nruns): # random sample valid timelines
             # make value back to baselines
@@ -246,8 +253,6 @@ class CreditFlow:
             order = list(np.random.permutation(sources))
             if self.verbose:
                 print(f"\n----> using order {order}")
-
-            if self.verbose:
                 print("baselines " +\
                       ", ".join(map(lambda node: f"{node}: {node.last_val}",
                                     order)))
@@ -364,7 +369,48 @@ class CreditFlow:
                 edge_credit[node1][node2] += val
 
         return self.credit2dot_pygraphviz(edge_credit, format_str)
-                
+
+class GraphExplainer:
+    # todo: rewrite for batch version
+    def __init__(self, graph, baseline_sampler, nsamples=100):
+        '''
+        graph: graph to explain
+        baseline_sampler: sampler for background value
+        nsamples: how many runs for each data point
+        '''
+
+        def idx_f(idx, f):
+            ''' '''
+            def f_():
+                return f(idx)
+            return f_
+        
+        self.graph = graph
+        self.nsamples = nsamples
+        self.graph.baseline_sampler = baseline_sampler
+
+    def shap_values(self, X):
+        """ Estimate the SHAP values for a set of samples.
+
+        Parameters
+        ----------
+        X : numpy.array, pandas.DataFrame or scipy.csr_matrix
+            A matrix of samples (# samples x # features) on which to explain 
+            the model's output.
+
+        Returns
+        -------
+        For models with a single output this returns a matrix of SHAP values
+        (# samples x # features). Each row sums to the difference between the 
+        model output for that sample and the expected value of the model output
+        (which is stored as expected_value attribute of the explainer).
+        """
+        """
+        this should just be edge_credit, but make credit a vector;
+        Now the result is really shap_graphs, not shap_values
+        """
+        pass
+
 ##### helper functions
 # graph visualization
 def viz_graph(G):
@@ -567,7 +613,7 @@ def single_source_graph(graph):
 
     graph.baseline_sampler[s.name] = lambda: 0
     graph.target_sampler[s.name] = lambda: 1
-    graph.nodes.append(s)
+    graph.add_node(s)
     graph.reset()
     return graph
 
@@ -599,7 +645,7 @@ def hcluster_graph(graph, source_names, cluster_matrix, verbose=False):
 
         graph.baseline_sampler[s.name] = lambda: 0
         graph.target_sampler[s.name] = lambda: 1
-        graph.nodes.append(s)
+        graph.add_node(s)
         nodes.append(s)
         
     graph.reset()
