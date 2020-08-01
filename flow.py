@@ -326,7 +326,10 @@ class CreditFlow:
 
                 red = "#ff0051"
                 blue = "#008bfb"
-                color = f"{blue}ff" if v < 0 else f"{red}ff" # blue and red
+                if idx < 0:
+                    color = f"{blue}ff"
+                else:
+                    color = f"{blue}ff" if v < 0 else f"{red}ff" # blue and red
                 
                 max_w = 5
                 min_w = 0.05
@@ -365,8 +368,11 @@ class CreditFlow:
                 alpha = "{:0>2}".format(hex(
                     int(abs(v) / max_v * (max_c - min_c) + min_c)
                 )[2:]) # skip 0x
-                e.attr["fontcolor"] = f"{blue}{alpha}" if v < 0 else\
-                    f"{red}{alpha}"
+                if idx < 0:
+                    e.attr["fontcolor"] = f"{blue}{alpha}"
+                else:
+                    e.attr["fontcolor"] = f"{blue}{alpha}" if v < 0 else\
+                        f"{red}{alpha}"
         return G
         
     def credit2dot(self, format_str="{:.2f}", idx=-1):
