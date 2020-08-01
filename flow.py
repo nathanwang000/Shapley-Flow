@@ -454,6 +454,29 @@ def save_graph(G, name):
     '''
     G.layout(prog='dot')
     G.draw(name)
+def translator(names, X, X_display):
+    '''
+    X and X_display are assumed to be convertible to np array
+    of shape (n, d)
+    '''
+    def f(A, B):
+        d = dict((a, b) for a, b in zip(A, B))
+            
+        def f_(val):
+            if val in d:
+                return d[val]
+            return val
+        return f_
+    
+    res = {}
+    X = np.array(X).T
+    X_display = np.array(X_display).T
+    assert X.shape == X_display.shape, "translation must have same shape"
+    
+    for i, name in enumerate(names):
+        res[name] = f(X[i], X_display[i])
+    return res
+
 # graph algorithm
 def get_source_nodes(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
