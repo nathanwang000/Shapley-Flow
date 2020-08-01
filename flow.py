@@ -6,6 +6,8 @@ import copy
 import warnings
 from pygraphviz import AGraph
 from graphviz import Digraph, Source
+from collections.abc import Iterable
+import tqdm
 
 class GraphIterator:
     def __init__(self, graph):
@@ -56,13 +58,27 @@ class Graph:
 
     def __iter__(self):
         return GraphIterator(self)
+
+    def sample(self, sampler, name):
+        s = sampler[name]()
+        if not isinstance(s, Iterable):
+            s = [s]
+        return np.array(s)
     
+    def sample_all(self, sampler):
+        '''
+        sampler could be baseline sampler or target sampler
+        return {name: val} where val is a numpy array
+        '''
+        d = {}
+        for name in sampler:
+            d[name] = self.sample(sampler, name)
+        return d
+            
     def reset(self):
-        # todo: rewrite with batch version
-        baseline_values = dict((key, f()) for key, f \
-                               in self.baseline_sampler.items())
-        target_values = dict((key, f()) for key, f \
-                             in self.target_sampler.items())
+        
+        baseline_values = self.sample_all(self.baseline_sampler)
+        target_values = self.sample_all(self.target_sampler)
 
         n_targets = 0
         for node in topo_sort(self):
@@ -244,9 +260,9 @@ class CreditFlow:
         '''
         run shap flow algorithm to fairly allocate credit
         '''
-        # todo: rewrite for batch version
         sources = get_source_nodes(self.graph)
-        for i in range(self.nruns): # random sample valid timelines
+        # random sample valid timelines
+        for i in tqdm.trange(self.nruns, desc='sampling'):
             # make value back to baselines
             self.reset()
             
@@ -283,15 +299,17 @@ class CreditFlow:
                         
                 self.dfs(node, order)
 
-    def print_credit(self):
-        for node1, d in self.edge_credit.items():
+    def print_credit(self, edge_credit=None):
+        if edge_credit is None: edge_credit = self.edge_credit
+        for node1, d in edge_credit.items():
             for node2, val in d.items():
                 print(f'credit {node1}->{node2}: {val/self.nruns}')
 
 
-    def credit2dot_pygraphviz(self, edge_credit, format_str):
+    def credit2dot_pygraphviz(self, edge_credit, format_str, idx=-1):
         '''
         pygraphviz version of credit2dot
+        idx: the index of target to visualize, if negative assumes sum
         '''
         G = AGraph(directed=True)
 
@@ -325,14 +343,17 @@ class CreditFlow:
                         if node.is_noise_node and self.fold_noise:
                             G.add_node(node, shape="point")
                         else:
-                            txt = self.graph.display_translator\
-                                [node.name](node.target)
-                            if type(txt) is str:
-                                fmt = "{}: {}"
+                            if idx < 0:
+                                G.add_node(node, label=node.name)
                             else:
-                                fmt = "{}: " + format_str
-                            G.add_node(node, label=\
-                                   fmt.format(node, txt))
+                                txt = self.graph.display_translator\
+                                    [node.name](node.target[idx])
+                                if type(txt) is str:
+                                    fmt = "{}: {}"
+                                else:
+                                    fmt = "{}: " + format_str
+                                G.add_node(node, label=\
+                                           fmt.format(node, txt))
 
                 G.add_edge(node1, node2)
                 e = G.get_edge(node1, node2)                
@@ -348,17 +369,17 @@ class CreditFlow:
                     f"{red}{alpha}"
         return G
         
-    def credit2dot(self, format_str="{:.2f}"):
+    def credit2dot(self, format_str="{:.2f}", idx=-1):
         '''
-        convert the graph to pydot graph for visualization:
-        e.g. 
-        from IPython.display import Image
-        G = self.credit2dot()
-        G.write_png("graph.png")
-        Image(G.png)
+        convert the graph to pydot graph for visualization
+        e.g.:
+        G = cf.credit2dot()
+        viz_graph(G)
+
+        idx: the index of target to visualize, if negative assumes sum
         '''
         edge_credit = defaultdict(lambda: defaultdict(int))
-
+        
         # simplify for dummy intermediate node for multi-graph
         for node1, d in self.edge_credit.items():
             for node2, val in d.items():
@@ -366,12 +387,18 @@ class CreditFlow:
                     continue # should be covered in the next case
                 if node2.is_dummy_node:
                     node2 = node2.children[0]
-                edge_credit[node1][node2] += val
 
-        return self.credit2dot_pygraphviz(edge_credit, format_str)
+                if idx < 0 and len(val) == 1:
+                    idx = 0
+                if idx < 0:
+                    edge_credit[node1][node2] += np.mean(np.abs(val))
+                else:
+                    edge_credit[node1][node2] += val[idx]
+
+        return self.credit2dot_pygraphviz(edge_credit, format_str, idx)
 
 class GraphExplainer:
-    # todo: rewrite for batch version
+    # todo: do this later
     def __init__(self, graph, baseline_sampler, nsamples=100):
         '''
         graph: graph to explain
@@ -499,36 +526,38 @@ def eval_graph(graph, val_dict):
         if node.is_target_node:
             return node.val
 
-def merge_h(node1, node2):
-    '''assume node 1 depend on node2, otherwise return node1
-    helper function for merge_nodes'''
-    if node2 in node1.args:
-
-        def create_f(node1, node2):
-            def f(*args):
-                node2_args, node1_args = args[:len(node2.args)], args[len(node2.args):]
-                v = node2.f(*node2_args)
-                args = []
-                idx = 0
-                for a in node1.args:
-                    if a.name == node2.name:
-                        args.append(v)
-                    else:
-                        args.append(node1_args[idx])
-                        idx += 1
-                return node1.f(*args)
-            return f
-
-        args = node2.args + [a for a in node1.args if a.name != node2.name]
-        node1 = Node(node1.name, create_f(node1, node2), args)
-
-    return node1
-
 def merge_nodes(nodes):
     '''
     nodes: assume nodes follow topological order, with the last being the target
     helper function for boundary_graph
     '''
+    def merge_h(node1, node2):
+        '''assume node 1 depend on node2, otherwise return node1
+        helper function for merge_nodes'''
+        if node2 in node1.args:
+
+            def create_f(node1, node2):
+                def f(*args):
+                    node2_args = args[:len(node2.args)]
+                    node1_args = args[len(node2.args):]
+                    v = node2.f(*node2_args)
+                    args = []
+                    idx = 0
+                    for a in node1.args:
+                        if a.name == node2.name:
+                            args.append(v)
+                        else:
+                            args.append(node1_args[idx])
+                            idx += 1
+                    return node1.f(*args)
+                return f
+
+            args = node2.args + [a for a in node1.args if a.name != node2.name]
+            node1 = Node(node1.name, create_f(node1, node2), args)
+
+        return node1
+
+
     y = nodes[-1]
     assert y.is_target_node, "assumes last one is the target"
     for node in nodes[:-1][::-1]:
@@ -560,7 +589,8 @@ def boundary_graph(graph, boundary_nodes=[]):
     graph = copy.deepcopy(graph)
     
     # find the boundary node's ancestor and include it in the graph with dfs
-    boundary_nodes = [node for node in graph if node.name in boundary_nodes] + get_source_nodes(graph)
+    boundary_nodes = [node for node in graph if node.name in boundary_nodes] \
+        + get_source_nodes(graph)
     visited = set()
     def dfs(node):
         if node in visited: return
@@ -602,11 +632,14 @@ def single_source_graph(graph):
     s = Node('seed', is_noise_node=True)
     for node in sources:
         node.add_arg(s)
-        
+
         def create_f(graph, node):
             def f(s):
-                return graph.baseline_sampler[node.name]() if s==0 else\
-                    graph.target_sampler[node.name]()
+                if s == 0:
+                    return graph.sample(graph.baseline_sampler, node.name)
+                else:
+                    return graph.sample(graph.target_sampler, node.name)
+                
             return f
         
         node.f = create_f(graph, node)
@@ -624,20 +657,23 @@ def hcluster_graph(graph, source_names, cluster_matrix, verbose=False):
     graph: a flat graph with input features
     '''
     graph = copy.deepcopy(graph)
-    nodes = sorted(get_source_nodes(graph), key=lambda node: source_names.index(node.name))
+    nodes = sorted(get_source_nodes(graph),
+                   key=lambda node: source_names.index(node.name))
     for row in cluster_matrix:
         node1 = nodes[int(row[0])]
         node2 = nodes[int(row[1])]
         if verbose:
-            print(f'merging {node1} and {node2} with dist {row[2]} and {row[3]} elements')
+            print(f'merging {node1} and {node2} (dist={row[2]}, n={row[3]})')
         s = Node(f"{node1} x {node2}", is_noise_node=True)
         node1.add_arg(s)
         node2.add_arg(s)
         
         def create_f(graph, node):
             def f(s):
-                return graph.baseline_sampler[node.name]() if s==0 else\
-                    graph.target_sampler[node.name]()
+                if s == 0:
+                    return graph.sample(graph.baseline_sampler, node.name)
+                else:
+                    return graph.sample(graph.target_sampler, node.name)
             return f
 
         node1.f = create_f(graph, node1)
