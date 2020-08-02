@@ -48,18 +48,40 @@ class Graph:
         for k, v in display_translator.items():
             self.display_translator[k] = v
 
-    def add_node(self, node):
-        '''
-        add a node to nodes
-        '''
-        self.nodes.append(node)
-        
     def __len__(self):
         return len(self.nodes)
 
     def __iter__(self):
         return GraphIterator(self)
 
+    def to_graphviz(self):
+        '''
+        convert to graphviz format
+        '''
+        G = AGraph(directed=True)
+        for node1 in topo_sort(self.nodes):
+            for node2 in node1.args:
+
+                for node in [node1, node2]:
+                    if node not in G:
+                        G.add_node(node, label=node.name)
+
+                G.add_edge(node2, node1)
+                
+        return G
+
+    def draw(self):
+        '''
+        requires in ipython notebook environment
+        '''
+        viz_graph(self.to_graphviz())
+        
+    def add_node(self, node):
+        '''
+        add a node to nodes
+        '''
+        self.nodes.append(node)
+        
     def sample(self, sampler, name):
         # todo: prefetch this and also just reuse the same bg for all targets
         s = sampler[name]()
@@ -423,7 +445,7 @@ class GraphExplainer:
         assert type(X) == pd.DataFrame, \
             "assume data frame with column names matching node names"
         
-        self.graph = graph
+        self.graph = copy.deepcopy(graph)
         self.nruns = nruns
         assert type(X) == pd.DataFrame, \
             "assume data frame with column names matching node names"
@@ -434,7 +456,96 @@ class GraphExplainer:
         def f_():
             return f(idx)
         return f_
+
+    def set_noise_sampler(self):
+        '''
+        set baseline and target sampler for noise terms for self.graph
+        we automatically add the noise node for each node if its computed
+        target value differs from the actual value
+
+        Assumptions:
+        1. if the computation function output a (n, d) matrix: then we 
+        assume the variable is discrete, otherwise we assume it is 
+        continuous
         
+        determine the following attribute for noise
+        target: value that is consistent with the data
+        baseline: if discrete just sample from 0-1, else sample from 
+                  empirical distribution of the background
+        '''
+        def node_f_ctn(f):
+            '''
+            decorator for continous node function to include noise
+            
+            f: original node function without noise
+            '''
+            def f_(*args):
+                # the last term is the noise term
+                return f(*args[:-1]) + args[-1]
+                
+            return f_
+        
+        bg_values = self.graph.sample_all(self.graph.baseline_sampler)
+        fg_values = self.graph.sample_all(self.graph.target_sampler)
+        
+        for node in topo_sort(self.graph):
+
+            if len(node.args) == 0: # source node
+                node.bg_val = bg_values[node.name]
+                node.fg_val = fg_values[node.name]                
+                
+            if len(node.args) > 0:
+                
+                bg_computed = node.f(*[arg.bg_val for arg in node.args])
+                fg_computed = node.f(*[arg.fg_val for arg in node.args])
+                
+                if node.name in bg_values:
+                    bg_sampled = bg_values[node.name]
+                    fg_sampled = fg_values[node.name]
+                    
+                    node.bg_val = bg_sampled
+                    node.fg_val = fg_sampled
+                    
+                    if bg_sampled.shape != bg_computed.shape or \
+                       (bg_sampled != bg_computed).any():
+                        # add a noise node
+                        noise_node = Node(node.name + " noise",
+                                          is_noise_node=True)
+                        self.graph.add_node(noise_node)
+                        
+                        # change the function dependence of the node
+                        node.add_arg(noise_node)
+                        if bg_sampled.shape != bg_computed.shape:
+                            # todo
+                            # discrete variables
+                            pass
+                        else: # continuous variable
+
+                            # wrapper for scope
+                            def wrap_bg_sampler(bg_diff, len_fg):
+                                def f_():
+                                    return bg_diff[np.random.choice(len(bg_diff),
+                                                                    len_fg)]
+                                return f_
+
+                            def wrap_fg_sampler(fg_diff):
+                                def f_():
+                                    return fg_diff
+                                return f_
+                            
+                            # reset node.f
+                            node.f = node_f_ctn(node.f)
+                            # add baseline and target sampler for noise_node
+                            bg_diff = bg_sampled - bg_computed
+                            fg_diff = fg_sampled - fg_computed
+                            self.graph.baseline_sampler[noise_node.name] = \
+                                wrap_bg_sampler(bg_diff, len(self.fg))
+                            self.graph.target_sampler[noise_node.name] = \
+                                wrap_fg_sampler(fg_diff)
+                else:
+                    node.bg_val = bg_computed
+                    node.fg_val = fg_computed
+            
     def shap_values(self, X):
         """ Estimate the SHAP values for a set of samples.
 
@@ -452,7 +563,7 @@ class GraphExplainer:
         assert type(X) == pd.DataFrame, \
             "assume data frame with column names matching node names"
         assert (self.bg.columns == X.columns).all(), "feature names must match"
-
+        self.fg = X
         names = X.columns
         bg = np.array(self.bg)
         rc = np.random.choice
@@ -465,6 +576,7 @@ class GraphExplainer:
         self.graph.target_sampler = dict((name, self._idx_f(i, lambda i: \
                                                             np.array(X)[:, i]))
                                          for i, name in enumerate(names))
+        self.set_noise_sampler()
         cf = CreditFlow(self.graph, nruns=self.nruns)
         cf.run()
         return cf
@@ -485,6 +597,7 @@ def save_graph(G, name):
     '''
     G.layout(prog='dot')
     G.draw(name)
+    
 def translator(names, X, X_display):
     '''
     X and X_display are assumed to be convertible to np array
