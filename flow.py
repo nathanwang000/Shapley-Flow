@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from collections import defaultdict
 import matplotlib.pyplot as plt
 import networkx as nx
@@ -26,7 +27,7 @@ class GraphIterator:
 
 class Graph:
     '''list of nodes'''
-    def __init__(self, nodes, baseline_sampler, target_sampler,
+    def __init__(self, nodes, baseline_sampler={}, target_sampler={},
                  display_translator={}):
         '''
         nodes: sequence of Node object
@@ -60,6 +61,7 @@ class Graph:
         return GraphIterator(self)
 
     def sample(self, sampler, name):
+        # todo: prefetch this and also just reuse the same bg for all targets
         s = sampler[name]()
         if not isinstance(s, Iterable):
             s = [s]
@@ -172,6 +174,13 @@ class CreditFlow:
         self.penwidth_normal = 1
         self.fold_noise = fold_noise
 
+    def draw(self, format_str="{:.2f}", idx=-1):
+        '''
+        assumes using ipython notebook
+        idx: index to draw, <0 means using the summary abs mean plot
+        '''
+        viz_graph(self.credit2dot(format_str, idx))
+        
     def credit(self, node, val):
         if node is None or node.from_node is None:
             return
@@ -404,45 +413,61 @@ class CreditFlow:
         return self.credit2dot_pygraphviz(edge_credit, format_str, idx)
 
 class GraphExplainer:
-    # todo: do this later
-    def __init__(self, graph, baseline_sampler, nsamples=100):
+
+    def __init__(self, graph, X, nruns=100):
         '''
         graph: graph to explain
-        baseline_sampler: sampler for background value
-        nsamples: how many runs for each data point
+        X: background value samples from X, assumes dataframe
+        nruns: how many runs for each data point
         '''
-
-        def idx_f(idx, f):
-            ''' '''
-            def f_():
-                return f(idx)
-            return f_
+        assert type(X) == pd.DataFrame, \
+            "assume data frame with column names matching node names"
         
         self.graph = graph
-        self.nsamples = nsamples
-        self.graph.baseline_sampler = baseline_sampler
-
+        self.nruns = nruns
+        assert type(X) == pd.DataFrame, \
+            "assume data frame with column names matching node names"
+        self.bg = X        
+        
+    def _idx_f(self, idx, f):
+        '''helper to save context'''
+        def f_():
+            return f(idx)
+        return f_
+        
     def shap_values(self, X):
         """ Estimate the SHAP values for a set of samples.
 
         Parameters
         ----------
-        X : numpy.array, pandas.DataFrame or scipy.csr_matrix
+        X : pandas.DataFrame
             A matrix of samples (# samples x # features) on which to explain 
             the model's output.
 
         Returns
         -------
-        For models with a single output this returns a matrix of SHAP values
-        (# samples x # features). Each row sums to the difference between the 
-        model output for that sample and the expected value of the model output
-        (which is stored as expected_value attribute of the explainer).
+        a credit flow object
         """
-        """
-        this should just be edge_credit, but make credit a vector;
-        Now the result is really shap_graphs, not shap_values
-        """
-        pass
+
+        assert type(X) == pd.DataFrame, \
+            "assume data frame with column names matching node names"
+        assert (self.bg.columns == X.columns).all(), "feature names must match"
+
+        names = X.columns
+        bg = np.array(self.bg)
+        rc = np.random.choice
+        self.graph.baseline_sampler = dict((name,
+                                            self._idx_f(i, lambda i: \
+                                                        bg[rc(len(bg),
+                                                              len(X))][:, i]))
+                                           for i, name in enumerate(names))
+        
+        self.graph.target_sampler = dict((name, self._idx_f(i, lambda i: \
+                                                            np.array(X)[:, i]))
+                                         for i, name in enumerate(names))
+        cf = CreditFlow(self.graph, nruns=self.nruns)
+        cf.run()
+        return cf
 
 ##### helper functions
 # graph visualization
