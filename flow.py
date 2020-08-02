@@ -761,14 +761,23 @@ def build_graph():
     return graph
 
 # sample runs
-def main():
-
+def example_detailed():
+    ''' 
+    an example with detailed control over the algorithm
+    '''
     graph = build_graph()    
     cf = CreditFlow(graph, verbose=False, nruns=1)
     cf.run()
-    cf.print_credit()
+    cf.print_credit() # cf.draw() if using ipython notebook
 
-    return cf
+def example_concise():
+    '''
+    an example with recommended way of running the module
+    '''
+    graph = build_graph()
+    explainer = GraphExplainer(graph, pd.DataFrame.from_dict({'x1': [0]}))
+    cf = explainer.shap_values(pd.DataFrame.from_dict({'x1': [1]}))
+    cf.print_credit() # cf.draw() if using ipython notebook
     
 if __name__ == '__main__':
-    main()
+    example_concise()
