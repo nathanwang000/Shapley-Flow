@@ -199,12 +199,14 @@ class CreditFlow:
         self.penwidth_normal = 1
         self.fold_noise = fold_noise
 
-    def draw(self, format_str="{:.2f}", idx=-1):
+    def draw(self, idx=-1, max_display=None, format_str="{:.2f}"):
         '''
         assumes using ipython notebook
         idx: index to draw, <0 means using the summary abs mean plot
         '''
-        viz_graph(self.credit2dot(format_str, idx))
+        viz_graph(self.credit2dot(format_str=format_str,
+                                  idx=idx,
+                                  max_display=max_display))
         
     def credit(self, node, val):
         if node is None or node.from_node is None:
@@ -340,23 +342,33 @@ class CreditFlow:
                 print(f'credit {node1}->{node2}: {val/self.nruns}')
 
 
-    def credit2dot_pygraphviz(self, edge_credit, format_str, idx=-1):
+    def credit2dot_pygraphviz(self, edge_credit, format_str, idx=-1,
+                              max_display=None):
         '''
         pygraphviz version of credit2dot
         idx: the index of target to visualize, if negative assumes sum
         '''
         G = AGraph(directed=True)
 
+        edge_values = []
         max_v = 0
         for node1, d in edge_credit.items():
             for node2, val in d.items():
                 max_v = max(abs(val/self.nruns), max_v)
+                edge_values.append(abs(val/self.nruns))
+
+        edge_values = sorted(edge_values)
+        if max_display is None or max_display >= len(edge_values):
+            min_v = 0
+        else:
+            min_v = edge_values[-max_display]
         
         for node1, d in edge_credit.items():
             for node2, val in d.items():
                 
                 v = val/self.nruns
                 edge_label = format_str.format(v)
+                if abs(v) < min_v: continue
 
                 red = "#ff0051"
                 blue = "#008bfb"
@@ -411,7 +423,7 @@ class CreditFlow:
                         f"{red}{alpha}"
         return G
         
-    def credit2dot(self, format_str="{:.2f}", idx=-1):
+    def credit2dot(self, format_str="{:.2f}", idx=-1, max_display=None):
         '''
         convert the graph to pydot graph for visualization
         e.g.:
@@ -419,6 +431,7 @@ class CreditFlow:
         viz_graph(G)
 
         idx: the index of target to visualize, if negative assumes sum
+        max_display: max number of edges attribution to display
         '''
         edge_credit = defaultdict(lambda: defaultdict(int))
         
@@ -437,7 +450,8 @@ class CreditFlow:
                 else:
                     edge_credit[node1][node2] += val[idx]
 
-        return self.credit2dot_pygraphviz(edge_credit, format_str, idx)
+        return self.credit2dot_pygraphviz(edge_credit, format_str,
+                                          idx, max_display)
 
 class GraphExplainer:
 
@@ -610,20 +624,13 @@ class GraphExplainer:
                     node.bg_val = bg_computed
                     node.fg_val = fg_computed
             
-    def shap_values(self, X):
-        """ Estimate the SHAP values for a set of samples.
 
-        Parameters
-        ----------
+    def prepare_graph(self, X):
+        '''
         X : pandas.DataFrame
             A matrix of samples (# samples x # features) on which to explain 
             the model's output.
-
-        Returns
-        -------
-        a credit flow object
-        """
-
+        '''
         assert type(X) == pd.DataFrame, \
             "assume data frame with column names matching node names"
         assert (self.bg.columns == X.columns).all(), "feature names must match"
@@ -641,6 +648,21 @@ class GraphExplainer:
                                                             np.array(X)[:, i]))
                                          for i, name in enumerate(names))
         self.set_noise_sampler()
+        
+    def shap_values(self, X):
+        """ Estimate the SHAP values for a set of samples.
+
+        Parameters
+        ----------
+        X : pandas.DataFrame
+            A matrix of samples (# samples x # features) on which to explain 
+            the model's output.
+
+        Returns
+        -------
+        a credit flow object
+        """
+        self.prepare_graph(X)
         cf = CreditFlow(self.graph, nruns=self.nruns)
         cf.run()
         return cf
@@ -654,12 +676,12 @@ def viz_graph(G):
     '''
     display(Source(G.string()))
 
-def save_graph(G, name):
+def save_graph(G, name, layout="dot"):
     '''
     G is a pygraphviz object;
     save G to a file with name
     '''
-    G.layout(prog='dot')
+    G.layout(prog=layout)
     G.draw(name)
     
 def translator(names, X, X_display):
@@ -854,6 +876,7 @@ def single_source_graph(graph):
     '''
     check if a graph has a single source. If not,
     add an artificial source node
+    collapse source noise node that are noise by setting them to be dummy
     '''
     graph = copy.deepcopy(graph)
     sources = get_source_nodes(graph)
@@ -863,6 +886,8 @@ def single_source_graph(graph):
     s = Node('seed', is_noise_node=True)
     for node in sources:
         node.add_arg(s)
+        if node.is_noise_node:
+            node.is_dummy_node = True
 
         def create_f(graph, node):
             def f(s):
