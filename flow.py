@@ -207,6 +207,31 @@ class CreditFlow:
         viz_graph(self.credit2dot(format_str=format_str,
                                   idx=idx,
                                   max_display=max_display))
+
+    def draw_asv(self, idx=-1, max_display=None, format_str="{:.2f}"):
+        '''
+        asv view only shows impact of source features
+        assumes using ipython notebook
+        idx: index to draw, <0 means using the summary abs mean plot
+        '''
+        edge_credit = defaultdict(lambda: defaultdict(int))
+        target_node = [node for node in self.graph if node.is_target_node][0]
+        
+        # fold non source node
+        for node1, d in self.edge_credit.items():
+            for node2, val in d.items():
+                if len(node1.args) > 0: continue
+
+                if idx < 0 and len(val) == 1:
+                    idx = 0
+                if idx < 0:
+                    edge_credit[node1][target_node] += np.mean(np.abs(val))
+                else:
+                    edge_credit[node1][target_node] += val[idx]
+                
+        G = self.credit2dot_pygraphviz(edge_credit, format_str,
+                                       idx, max_display)
+        viz_graph(G)
         
     def credit(self, node, val):
         if node is None or node.from_node is None:
@@ -730,7 +755,7 @@ def topo_sort(graph):
                 sources.append(u)
     return order
 
-# graph operation
+# graph operation    
 def flatten_graph(graph):
     '''
     given a graph, return a graph with the graph flattened
