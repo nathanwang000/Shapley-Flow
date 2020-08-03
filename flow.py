@@ -126,7 +126,8 @@ class Node:
     '''models feature node as a computing function'''
     def __init__(self, name, f=None, args=[],
                  is_target_node=False, is_noise_node=False,
-                 is_dummy_node=False):
+                 is_dummy_node=False,
+                 is_categorical=False):
         '''
         name: name of the node
         f: functional form of this variable on other variables
@@ -141,12 +142,14 @@ class Node:
                        one children that shouldn't be drawn
                        but are in place to support multigraph and
                        graph folding
+        is_categorical: is the variable categorical
         '''
         self.name = name
         self.f = f
         self.is_target_node = is_target_node
         self.is_noise_node = is_noise_node
         self.is_dummy_node = is_dummy_node
+        self.is_categorical = is_categorical
 
         # arg values that are visible to the node
         self.visible_arg_values = {}
@@ -369,7 +372,7 @@ class CreditFlow:
                 if node1.is_dummy_node:
                     continue # should be covered in the next case
 
-                if node2.is_dummy_node:
+                if node2.is_dummy_node: # use the only direct child
                     node2 = node2.children[0]
 
                 for node in [node1, node2]:
@@ -377,8 +380,9 @@ class CreditFlow:
                         if node.is_noise_node and self.fold_noise:
                             G.add_node(node, shape="point")
                         else:
+                            shape = 'box' if node.is_categorical else 'ellipse'
                             if idx < 0:
-                                G.add_node(node, label=node.name)
+                                G.add_node(node, label=node.name, shape=shape)
                             else:
                                 txt = self.graph.display_translator\
                                     [node.name](node.target[idx])
@@ -387,7 +391,8 @@ class CreditFlow:
                                 else:
                                     fmt = "{}: " + format_str
                                 G.add_node(node, label=\
-                                           fmt.format(node, txt))
+                                           fmt.format(node, txt),
+                                           shape=shape)
 
                 G.add_edge(node1, node2)
                 e = G.get_edge(node1, node2)                
@@ -470,18 +475,36 @@ class GraphExplainer:
         
         determine the following attribute for noise
         target: value that is consistent with the data
-        baseline: if discrete just sample from 0-1, else sample from 
+        baseline: if categorical just sample from 0-1, else sample from 
                   empirical distribution of the background
         '''
-        def node_f_ctn(f):
+        def node_f_num(f):
             '''
-            decorator for continous node function to include noise
+            decorator for numerical node function to include noise
             
             f: original node function without noise
+            treat noise as additive noise
             '''
             def f_(*args):
-                # the last term is the noise term
-                return f(*args[:-1]) + args[-1]
+                noise = args[-1]
+                return f(*args[:-1]) + noise
+                
+            return f_
+
+        def node_f_cat(f):
+            '''
+            decorator for categorical node function to include noise
+            
+            f: original node function without noise
+            treat noise as inverse sampling
+            '''
+            def f_(*args):
+                noise = args[-1] # (n,)
+                computed = f(*args[:-1]) # (n, d)
+                assert (computed[:, -1].sum() > 0.99).all(),\
+                    "need output of softmax"
+                computed[:, -1] = 1.01 # avoid numerical issue
+                return (computed.cumsum(1).T > noise).T.argmax(1)
                 
             return f_
         
@@ -516,10 +539,51 @@ class GraphExplainer:
                         # change the function dependence of the node
                         node.add_arg(noise_node)
                         if bg_sampled.shape != bg_computed.shape:
-                            # todo
-                            # discrete variables
-                            pass
-                        else: # continuous variable
+                            node.is_categorical = True
+                            # categorical variables
+                            # wrapper for scope
+                            def wrap_bg_sampler(len_fg):
+                                def f_():
+                                    return np.random.uniform(0, 1, len_fg)
+                                return f_
+
+                            def prob_range(cum, s):
+                                '''
+                                cum is (n, d) cumulative sum, 
+                                s is (n,) selector
+                                return lower and upper probability 
+                                needed to sample
+                                '''
+                                upper = cum[np.arange(len(s)), s]
+                                s = s - 1
+                                zero_loc = s < 0
+                                s[s < 0] = 0
+                                lower = cum[np.arange(len(s)), s]
+                                lower[zero_loc] = 0
+                                return lower, upper
+                            
+
+                            def wrap_fg_sampler(lower_prob, upper_prob):
+                                ''' 
+                                lower_prob, upper_prob: output of prob_range
+                                '''
+                                def f_():
+                                    return np.random.uniform(lower_prob,
+                                                             upper_prob)
+                                return f_
+                            
+                            # reset node.f
+                            node.f = node_f_cat(node.f)
+                            # add baseline and target sampler for noise_node
+                            self.graph.baseline_sampler[noise_node.name] = \
+                                wrap_bg_sampler(len(self.fg))
+
+                            lower, upper = prob_range(fg_computed.cumsum(1),
+                                                      fg_sampled.astype(int))
+                            self.graph.target_sampler[noise_node.name] = \
+                                wrap_fg_sampler(lower, upper)
+                            
+                        else: # numerical variables
 
                             # wrapper for scope
                             def wrap_bg_sampler(bg_diff, len_fg):
@@ -534,7 +598,7 @@ class GraphExplainer:
                                 return f_
                             
                             # reset node.f
-                            node.f = node_f_ctn(node.f)
+                            node.f = node_f_num(node.f)
                             # add baseline and target sampler for noise_node
                             bg_diff = bg_sampled - bg_computed
                             fg_diff = fg_sampled - fg_computed
