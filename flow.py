@@ -9,6 +9,8 @@ from pygraphviz import AGraph
 from graphviz import Digraph, Source
 from collections.abc import Iterable
 import tqdm
+import joblib
+from pathos.pools import ProcessPool
 
 class GraphIterator:
     def __init__(self, graph):
@@ -83,6 +85,10 @@ class Graph:
         self.nodes.append(node)
         
     def sample(self, sampler, name):
+        '''
+        sample from a sampler
+        if the sampled data is not an iterable, make it so
+        '''
         # todo: prefetch this and also just reuse the same bg for all targets
         s = sampler[name]()
         if not isinstance(s, Iterable):
@@ -100,10 +106,11 @@ class Graph:
         return d
             
     def reset(self):
-        
+
         baseline_values = self.sample_all(self.baseline_sampler)
         target_values = self.sample_all(self.target_sampler)
 
+        _i = 0
         n_targets = 0
         for node in topo_sort(self):
             if len(node.args) == 0: # source node
@@ -120,6 +127,10 @@ class Graph:
 
             n_targets += node.is_target_node
 
+            _i += 1
+            print(f"{_i}/{len(self)}")
+
+        print("done 1 round")
         assert n_targets == 1, f"{n_targets} target node, need 1"
 
 class Node:
@@ -180,7 +191,8 @@ class Node:
 class CreditFlow:
     ''' the main algorithm to get a flow of information '''
     def __init__(self, graph, verbose=False, nruns=10,
-                 visualize=False, fold_noise=True):
+                 visualize=False, fold_noise=True,
+                 silent=False):
         ''' 
         graph: causal graph to explain
         verbose: whether to print out decision process        
@@ -188,6 +200,8 @@ class CreditFlow:
         visualize: whether to visualize the graph build process, 
                    need to be verbose
         fold_noise: whether to show noise node as a point
+        silent: if true, overwrite visualize and verbose to False
+                and does not show progress bar
         '''
         self.graph = graph
         self.edge_credit = defaultdict(lambda: defaultdict(int))
@@ -198,6 +212,10 @@ class CreditFlow:
         self.penwidth_stress = 5
         self.penwidth_normal = 1
         self.fold_noise = fold_noise
+        self.silent = silent
+        if silent:
+            self.verbose = False
+            self.visualize = False
 
     def draw(self, idx=-1, max_display=None, format_str="{:.2f}"):
         '''
@@ -239,14 +257,14 @@ class CreditFlow:
 
         self.edge_credit[node.from_node][node] += val
         if self.verbose:
-            print(f"assign {val} credits to {node.from_node}->{node}")
+            print(f"assign {val[0]} credits to {node.from_node}->{node}")
             if self.visualize:
                 if not self.dot.has_edge(node.from_node, node):
                     self.dot.add_edge(node.from_node, node)
                 dot_edge = self.dot.get_edge(node.from_node, node)
                 dot_edge.attr['color'] = "blue"
                 label = dot_edge.attr['label'] or '0'
-                dot_edge.attr['label'] = f"{label}+{val}"
+                dot_edge.attr['label'] = f"{label}+{val[0]}"
                 dot_edge.attr['fontcolor'] = "blue"
                 dot_edge.attr['penwidth'] = self.penwidth_stress
                 viz_graph(self.dot)
@@ -272,7 +290,7 @@ class CreditFlow:
 
             if self.verbose:
                 print(f'turn on edge {node}->{c}')                
-                print(f'{c} changes from {c.last_val} to {c.val}')
+                print(f'{c} changes from {c.last_val[0]} to {c.val[0]}')
                 if self.visualize:
                     if not self.dot.has_edge(node, c):
                         self.dot.add_edge(node, c)
@@ -280,7 +298,7 @@ class CreditFlow:
                     dot_edge.attr['color'] = "orange"
                     dot_c = self.dot.get_node(c)
                     label = dot_c.attr['label']
-                    dot_c.attr['label'] = f"{label.split(':')[0]}: {c.val:.1f} ({c.baseline:.1f}->{c.target:.1f})"
+                    dot_c.attr['label'] = f"{label.split(':')[0]}: {c.val[0]:.1f} ({c.baseline[0]:.1f}->{c.target[0]:.1f})"
                     dot_c_color = dot_c.attr['color']
                     dot_edge.attr['penwidth'] = self.penwidth_stress
                     dot_c.attr['penwidth'] = self.penwidth_stress
@@ -304,7 +322,7 @@ class CreditFlow:
         for node in topo_sort(graph):
             if node not in dot:
                 dot.add_node(node,
-                             label=f"{node.name}: {node.val:.1f} ({node.baseline:.1f}->{node.target:.1f})")
+                             label=f"{node.name}: {node.val[0]:.1f} ({node.baseline[0]:.1f}->{node.target[0]:.1f})")
             for p in node.args:
                 dot.add_edge(p, node)
 
@@ -322,8 +340,13 @@ class CreditFlow:
         run shap flow algorithm to fairly allocate credit
         '''
         sources = get_source_nodes(self.graph)
-        # random sample valid timelines
-        for i in tqdm.trange(self.nruns, desc='sampling'):
+        random sample valid timelines
+        if self.silent:
+            run_range = range(self.nruns)            
+        else:
+            run_range = tqdm.trange(self.nruns, desc='sampling')
+        
+        for i in run_range:
             # make value back to baselines
             self.reset()
             
@@ -331,7 +354,7 @@ class CreditFlow:
             if self.verbose:
                 print(f"\n----> using order {order}")
                 print("baselines " +\
-                      ", ".join(map(lambda node: f"{node}: {node.last_val}",
+                      ", ".join(map(lambda node: f"{node}: {node.last_val[0]}",
                                     order)))
             # follow the order
             for node in order:
@@ -341,13 +364,13 @@ class CreditFlow:
 
                 if self.verbose:
                     print(f"turn on edge from external source to {node}")
-                    print(f"{node} changes from {node.last_val} to {node.val}")
+                    print(f"{node} changes from {node.last_val[0]} to {node.val[0]}")
                     if self.visualize:
                         if node not in self.dot:
                             self.dot.add_node(node)
                         dot_node = self.dot.get_node(node)
                         label = dot_node.attr['label']
-                        dot_node.attr['label'] = f"{label.split(':')[0]}: {node.val:.1f} ({node.baseline:.1f}->{node.target:.1f})"
+                        dot_node.attr['label'] = f"{label.split(':')[0]}: {node.val[0]:.1f} ({node.baseline[0]:.1f}->{node.target[0]:.1f})"
                         dot_node.attr['penwidth'] = self.penwidth_stress
                         dot_node_color = dot_node.attr['color']
                         dot_node.attr['color'] = 'orange'
@@ -478,6 +501,122 @@ class CreditFlow:
         return self.credit2dot_pygraphviz(edge_credit, format_str,
                                           idx, max_display)
 
+class ParallelCreditFlow(CreditFlow):
+    
+    def __init__(self, graph, nruns=10, njobs=1, fold_noise=True):
+        ''' 
+        An embarassingly parallel implementaion of credit flow
+
+        graph: causal graph to explain
+        nruns: number of sampled valid timelines and permutations
+        fold_noise: whether to show noise node as a point
+        njobs: number of parallel jobs
+        '''
+        njobs = min(nruns, njobs)
+        self.cf = CreditFlow(graph,
+                             nruns=nruns // njobs,
+                             silent=False, # todo: change back
+                             verbose=True,
+                             fold_noise=fold_noise)
+        self.cf.reset() # to get baseline and target setup
+        self.njobs = njobs
+        self.nruns = nruns
+        print(f"{nruns} runs with {njobs} njobs")
+
+    def run(self):
+        '''
+        run shap flow for each sample
+        then combine the graphs
+        '''
+        pool = ProcessPool(nodes=self.njobs)
+        
+        # fill in edge_credit
+        def wrap_run(cf):
+            cf.run()
+
+            edge_credit = {}
+            for node1, d in cf.edge_credit.items():
+                for node2, val in d.items():
+                    if node1.name not in edge_credit:
+                        edge_credit[node1.name] = {}
+                    if node2.name not in edge_credit[node1.name]:
+                        edge_credit[node1.name][node2.name] = 0
+                    edge_credit[node1.name][node2.name] += val
+
+            return edge_credit
+
+        edge_credit_list = pool.map(wrap_run, [self.cf for _ in range(self.njobs)])
+
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for edge_credit in edge_credit_list:
+            for node1_name, d in edge_credit.items():
+                for node2_name, val in d.items():
+                    self.cf.edge_credit[name2node[node1_name]]\
+                        [name2node[node2_name]] +=  val / len(edge_credit_list)
+        
+    def run2(self):
+        '''
+        run shap flow for each sample
+        then combine the graphs
+        '''
+        import multiprocessing_on_dill as mp
+        if mp.get_start_method(allow_none=True) != "spawn":
+            mp.set_start_method("spawn")
+        
+        edge_credit = defaultdict(lambda: defaultdict(int))
+
+        # fill in edge_credit
+
+        # too slow: deprecated
+        # joblib.Parallel(n_jobs=self.njobs, prefer="threads")\
+        #     (joblib.delayed(cf.run)()\
+        #      for cf in self.cfs)
+
+        def wrap_run(cf, q):
+            cf.run()
+
+            edge_credit = {}
+            for node1, d in cf.edge_credit.items():
+                for node2, val in d.items():
+                    if node1.name not in edge_credit:
+                        edge_credit[node1.name] = {}
+                    if node2.name not in edge_credit[node1.name]:
+                        edge_credit[node1.name][node2.name] = 0
+                    edge_credit[node1.name][node2.name] += val
+
+            q.put(edge_credit)
+    
+        
+        queue = mp.Queue()
+
+        # processes = [mp.Process(target=wrap_run, args=(self.cf,))\
+        #              for _ in range(self.njobs)]
+            
+        processes = [mp.Process(target=wrap_run, args=(self.cf, queue))\
+                     for _ in range(self.njobs)]
+        for p in processes:
+            p.start()
+        print("start")
+        for p in processes:
+            p.join()
+
+        edge_credit_list = [queue.get() for p in processes]
+
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for edge_credit in edge_credit_list:
+            for node1_name, d in edge_credit.items():
+                for node2_name, val in d.items():
+                    self.cf.edge_credit[name2node[node1_name]]\
+                        [name2node[node2_name]] +=  val / len(edge_credit_list)
+
+    def draw(self, *args, **kwargs):
+        return self.cf.draw(*args, **kwargs)
+
+    def draw_asv(self, *args, **kwargs):
+        return self.cf.draw_asv(*args, **kwargs)
+        
 class GraphExplainer:
 
     def __init__(self, graph, X, nruns=100):
@@ -784,11 +923,11 @@ def flatten_graph(graph):
                 node.args = [] # remove this node's link to parent
                 
                 graph.baseline_sampler[node.name] = node_function(lambda node:\
-                                                                  node.f(*[graph.baseline_sampler[arg.name]()\
+                                                                  node.f(*[graph.sample(graph.baseline_sampler, arg.name)\
                                                                            for arg in node.spare_args]),
                                                                   node)
                 graph.target_sampler[node.name] = node_function(lambda node:\
-                                                                node.f(*[graph.target_sampler[arg.name]()\
+                                                                node.f(*[graph.sample(graph.target_sampler, arg.name)\
                                                                          for arg in node.spare_args]),
                                                                 node)
                 
@@ -797,7 +936,10 @@ def flatten_graph(graph):
 def eval_graph(graph, val_dict):
     for node in topo_sort(graph):
         if node.name in val_dict:
-            node.val = val_dict[node.name]
+            v = val_dict[node.name]
+            if not isinstance(v, Iterable):
+                v = np.array([v])
+            node.val = v
         else:
             node.val = node.f(*[a.val for a in node.args])
 
