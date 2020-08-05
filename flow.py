@@ -340,7 +340,7 @@ class CreditFlow:
         run shap flow algorithm to fairly allocate credit
         '''
         sources = get_source_nodes(self.graph)
-        random sample valid timelines
+        # random sample valid timelines
         if self.silent:
             run_range = range(self.nruns)            
         else:
