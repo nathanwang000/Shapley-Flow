@@ -1,3 +1,4 @@
+import subprocess, time, select
 import numpy as np
 import pandas as pd
 from collections import defaultdict
@@ -10,7 +11,11 @@ from graphviz import Digraph, Source
 from collections.abc import Iterable
 import tqdm
 import joblib
+import dill
 from pathos.pools import ProcessPool
+import multiprocessing_on_dill as mp
+# if mp.get_start_method(allow_none=True) != "spawn":
+#     mp.set_start_method("spawn")
 
 class GraphIterator:
     def __init__(self, graph):
@@ -110,7 +115,6 @@ class Graph:
         baseline_values = self.sample_all(self.baseline_sampler)
         target_values = self.sample_all(self.target_sampler)
 
-        _i = 0
         n_targets = 0
         for node in topo_sort(self):
             if len(node.args) == 0: # source node
@@ -127,10 +131,6 @@ class Graph:
 
             n_targets += node.is_target_node
 
-            _i += 1
-            print(f"{_i}/{len(self)}")
-
-        print("done 1 round")
         assert n_targets == 1, f"{n_targets} target node, need 1"
 
 class Node:
@@ -208,7 +208,6 @@ class CreditFlow:
         self.verbose = verbose
         self.nruns = nruns
         self.visualize = visualize
-        self.dot = AGraph(directed=True)
         self.penwidth_stress = 5
         self.penwidth_normal = 1
         self.fold_noise = fold_noise
@@ -516,21 +515,14 @@ class ParallelCreditFlow(CreditFlow):
         self.cf = CreditFlow(graph,
                              nruns=nruns // njobs,
                              silent=False, # todo: change back
-                             verbose=True,
+                             # verbose=True,
                              fold_noise=fold_noise)
         self.cf.reset() # to get baseline and target setup
         self.njobs = njobs
         self.nruns = nruns
+        self.graph = graph
         print(f"{nruns} runs with {njobs} njobs")
 
-    def run(self):
-        '''
-        run shap flow for each sample
-        then combine the graphs
-        '''
-        pool = ProcessPool(nodes=self.njobs)
-        
-        # fill in edge_credit
         def wrap_run(cf):
             cf.run()
 
@@ -545,7 +537,77 @@ class ParallelCreditFlow(CreditFlow):
 
             return edge_credit
 
-        edge_credit_list = pool.map(wrap_run, [self.cf for _ in range(self.njobs)])
+        self.wrap_run = wrap_run
+
+    def run(self):
+        # todo: clean this
+        '''
+        1. serialize self.cf: s = dill.dumps(self.cf)
+        2. pass s to an external file that does wrap_run
+        3. serialize its output with dill and print to output
+        4. use subprocess to capture the output and convert back to dict
+           p.communicate()[0]
+        '''
+        fn = "cf.pkl" # todo write to a tmp file
+        write_fns = ["cf_o.pkl" for _ in range(self.njobs)] # todo: randomize this file
+        dill.dump(self.cf, open(fn, 'wb')) 
+
+        procs = []
+        selects = []
+        commands = [["python", "wrap_run.py", fn, write_fns[i]]\
+                    for i in range(self.njobs)]
+        for command in commands:
+            p = subprocess.Popen(command,
+                                 stdout=subprocess.PIPE)
+            procs.append(p)
+            y = select.poll()
+            y.register(p.stdout,select.POLLIN)
+            selects.append(y)
+
+        # join
+        selects_procs = list(zip(range(len(selects)), selects, procs))
+        edge_credit_list = []
+        while len(selects_procs) > 0:
+            i, y, p = selects_procs.pop(0)
+            if y.poll(1):
+                edge_credit_list.append(dill.load(open(write_fns[i], "rb")))
+                # o = p.stdout.readline()
+                # print(o.strip())
+                # edge_credit_list.append(dill.loads(o.strip()))
+            else:
+                selects_procs.append((i, y, p))
+                time.sleep(1)
+        
+        # while len(procs) > 0:
+        #     p = procs.pop(0)
+        #     if p.poll() == None: # active
+        #         procs.append(p)
+        #         time.sleep(1)
+        #     else:
+        #         o = p.communicate()[0]
+        #         print(o)
+        #         edge_credit_list.append(dill.loads(o))
+
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for edge_credit in edge_credit_list:
+            for node1_name, d in edge_credit.items():
+                for node2_name, val in d.items():
+                    self.cf.edge_credit[name2node[node1_name]]\
+                        [name2node[node2_name]] +=  val / len(edge_credit_list)
+    
+    def run3(self):
+        '''
+        DEPRECATED:
+        deadlock with numpy
+
+        run shap flow for each sample
+        then combine the graphs
+        '''
+        pool = ProcessPool(nodes=self.njobs)
+        
+        edge_credit_list = pool.map(self.wrap_run,
+                                    [self.cf for _ in range(self.njobs)])
 
         # combine edge credits
         name2node = dict((node.name, node) for node in self.cf.graph)
@@ -557,51 +619,24 @@ class ParallelCreditFlow(CreditFlow):
         
     def run2(self):
         '''
+        DEPRECATED: may deadlock due to numpy's lock; labmda not work with mp;
+        mp_on_dill does not work with "spawn";
+
+        Therefore this function cannot work with multi threading
+
         run shap flow for each sample
         then combine the graphs
         '''
-        import multiprocessing_on_dill as mp
-        if mp.get_start_method(allow_none=True) != "spawn":
-            mp.set_start_method("spawn")
-        
-        edge_credit = defaultdict(lambda: defaultdict(int))
-
         # fill in edge_credit
 
-        # too slow: deprecated
+        # deprecated: too slow because of GIL
         # joblib.Parallel(n_jobs=self.njobs, prefer="threads")\
         #     (joblib.delayed(cf.run)()\
         #      for cf in self.cfs)
 
-        def wrap_run(cf, q):
-            cf.run()
-
-            edge_credit = {}
-            for node1, d in cf.edge_credit.items():
-                for node2, val in d.items():
-                    if node1.name not in edge_credit:
-                        edge_credit[node1.name] = {}
-                    if node2.name not in edge_credit[node1.name]:
-                        edge_credit[node1.name][node2.name] = 0
-                    edge_credit[node1.name][node2.name] += val
-
-            q.put(edge_credit)
-    
-        
-        queue = mp.Queue()
-
-        # processes = [mp.Process(target=wrap_run, args=(self.cf,))\
-        #              for _ in range(self.njobs)]
-            
-        processes = [mp.Process(target=wrap_run, args=(self.cf, queue))\
-                     for _ in range(self.njobs)]
-        for p in processes:
-            p.start()
-        print("start")
-        for p in processes:
-            p.join()
-
-        edge_credit_list = [queue.get() for p in processes]
+        pool = mp.Pool(self.njobs)
+        edge_credit_list = pool.map(self.wrap_run,
+                                    [self.cf for _ in range(self.njobs)])
 
         # combine edge credits
         name2node = dict((node.name, node) for node in self.cf.graph)
