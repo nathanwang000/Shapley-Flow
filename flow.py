@@ -1,4 +1,4 @@
-import subprocess, time, select
+import subprocess, time, select, os, uuid, warnings
 import numpy as np
 import pandas as pd
 from collections import defaultdict
@@ -12,10 +12,10 @@ from collections.abc import Iterable
 import tqdm
 import joblib
 import dill
-from pathos.pools import ProcessPool
-import multiprocessing_on_dill as mp
-# if mp.get_start_method(allow_none=True) != "spawn":
-#     mp.set_start_method("spawn")
+dill.settings['recurse'] = True # important for reloading with dill
+import multiprocessing as mp
+if mp.get_start_method(allow_none=True) != "spawn":
+    mp.set_start_method("spawn") # important for not deadlock with numpy
 
 class GraphIterator:
     def __init__(self, graph):
@@ -511,17 +511,19 @@ class ParallelCreditFlow(CreditFlow):
         fold_noise: whether to show noise node as a point
         njobs: number of parallel jobs
         '''
+        self.temp_dir = "tmp"
+        os.system(f'mkdir -p {self.temp_dir}')
+        
         njobs = min(nruns, njobs)
         self.cf = CreditFlow(graph,
                              nruns=nruns // njobs,
-                             silent=False, # todo: change back
-                             # verbose=True,
+                             silent=False,
                              fold_noise=fold_noise)
         self.cf.reset() # to get baseline and target setup
         self.njobs = njobs
         self.nruns = nruns
         self.graph = graph
-        print(f"{nruns} runs with {njobs} njobs")
+        print(f"{nruns} runs with {njobs} jobs")
 
         def wrap_run(cf):
             cf.run()
@@ -539,55 +541,40 @@ class ParallelCreditFlow(CreditFlow):
 
         self.wrap_run = wrap_run
 
-    def run(self):
-        # todo: clean this
+    def run_subprocess(self):
         '''
+        run with subprocess
+        problem: too slow
+
         1. serialize self.cf: s = dill.dumps(self.cf)
         2. pass s to an external file that does wrap_run
         3. serialize its output with dill and print to output
         4. use subprocess to capture the output and convert back to dict
-           p.communicate()[0]
         '''
-        fn = "cf.pkl" # todo write to a tmp file
-        write_fns = ["cf_o.pkl" for _ in range(self.njobs)] # todo: randomize this file
-        dill.dump(self.cf, open(fn, 'wb')) 
+        fns = [unique_filename(self.temp_dir) for _ in range(self.njobs + 1)]
+        with open(fns[0], 'wb') as f:
+            dill.dump(self.cf, f)
 
         procs = []
-        selects = []
-        commands = [["python", "wrap_run.py", fn, write_fns[i]]\
+        commands = [["python", "wrap_run.py", fns[0], fns[i+1]]\
                     for i in range(self.njobs)]
-        for command in commands:
-            p = subprocess.Popen(command,
-                                 stdout=subprocess.PIPE)
+        for i, command in enumerate(commands):
+            p = subprocess.Popen(command)
             procs.append(p)
-            y = select.poll()
-            y.register(p.stdout,select.POLLIN)
-            selects.append(y)
 
         # join
-        selects_procs = list(zip(range(len(selects)), selects, procs))
-        edge_credit_list = []
-        while len(selects_procs) > 0:
-            i, y, p = selects_procs.pop(0)
-            if y.poll(1):
-                edge_credit_list.append(dill.load(open(write_fns[i], "rb")))
-                # o = p.stdout.readline()
-                # print(o.strip())
-                # edge_credit_list.append(dill.loads(o.strip()))
-            else:
-                selects_procs.append((i, y, p))
+        while True:
+            job_status = [p.poll() == None for p in procs]
+            if sum(job_status) > 0: # job active
+                print(f"wait {job_status}...")
                 time.sleep(1)
-        
-        # while len(procs) > 0:
-        #     p = procs.pop(0)
-        #     if p.poll() == None: # active
-        #         procs.append(p)
-        #         time.sleep(1)
-        #     else:
-        #         o = p.communicate()[0]
-        #         print(o)
-        #         edge_credit_list.append(dill.loads(o))
+            else:
+                break
 
+        print("done")
+        edge_credit_list = [dill.load(open(fns[i+1], "rb")) \
+                            for i in range(self.njobs)]
+        
         # combine edge credits
         name2node = dict((node.name, node) for node in self.cf.graph)
         for edge_credit in edge_credit_list:
@@ -595,48 +582,87 @@ class ParallelCreditFlow(CreditFlow):
                 for node2_name, val in d.items():
                     self.cf.edge_credit[name2node[node1_name]]\
                         [name2node[node2_name]] +=  val / len(edge_credit_list)
-    
-    def run3(self):
+
+        # clean up temp files
+        subprocess.Popen(['rm', f"{self.tmp_dir}/*"])
+
+    def run_dill(self):
         '''
-        DEPRECATED:
-        deadlock with numpy
+        first use dill to 
+        workaround for dealing with deadlock
 
-        run shap flow for each sample
-        then combine the graphs
+        problem: still not fast, similar speed as subprocess
         '''
-        pool = ProcessPool(nodes=self.njobs)
-        
-        edge_credit_list = pool.map(self.wrap_run,
-                                    [self.cf for _ in range(self.njobs)])
-
-        # combine edge credits
-        name2node = dict((node.name, node) for node in self.cf.graph)
-        for edge_credit in edge_credit_list:
-            for node1_name, d in edge_credit.items():
-                for node2_name, val in d.items():
-                    self.cf.edge_credit[name2node[node1_name]]\
-                        [name2node[node2_name]] +=  val / len(edge_credit_list)
-        
-    def run2(self):
-        '''
-        DEPRECATED: may deadlock due to numpy's lock; labmda not work with mp;
-        mp_on_dill does not work with "spawn";
-
-        Therefore this function cannot work with multi threading
-
-        run shap flow for each sample
-        then combine the graphs
-        '''
-        # fill in edge_credit
-
-        # deprecated: too slow because of GIL
-        # joblib.Parallel(n_jobs=self.njobs, prefer="threads")\
-        #     (joblib.delayed(cf.run)()\
-        #      for cf in self.cfs)
 
         pool = mp.Pool(self.njobs)
+        cf_str = dill.dumps(self.cf)
+        edge_credit_list = pool.map(dill_run,
+                                    [cf_str for _ in range(self.njobs)])
+
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for edge_credit in edge_credit_list:
+            for node1_name, d in edge_credit.items():
+                for node2_name, val in d.items():
+                    self.cf.edge_credit[name2node[node1_name]]\
+                        [name2node[node2_name]] +=  val / len(edge_credit_list)
+
+    def run_thread(self):
+        '''
+        use thread form joblib, but still prob b/c of GIL
+        '''
+        cfs = [CreditFlow(copy.deepcopy(self.graph),
+                          nruns=self.nruns // self.njobs,
+                          silent=True) for _ in range(self.njobs)]
+
+        joblib.Parallel(n_jobs=self.njobs, prefer="threads")\
+            (joblib.delayed(cf.run)()\
+             for cf in cfs)
+
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for cf in cfs:
+            edge_credit = cf.edge_credit
+            for node1, d in edge_credit.items():
+                for node2, val in d.items():
+                    self.cf.edge_credit[name2node[node1.name]]\
+                        [name2node[node2.name]] +=  val / self.njobs
+
+    def run_synthetic_process(self, method='mpd'):
+        '''
+        best for the random synthetic data
+        
+        problem: 
+        - may deadlock due to numpy's lock
+        - labmda not work with mp and joblib
+        - mp_on_dill does not work with "spawn"
+
+        deadlock can be solved by changing from "fork" to "spawn", but mpd
+        does not work with "spawn"
+
+        todo: investigate how to let it work with spawn
+
+        method:
+        'mpd': multiprocessing-on-dill
+        'pathos': pathos
+
+        Therefore this function cannot work with multi threading
+        '''
+        warnings.warn("May deadlock with numpy!", DeprecationWarning)
+        if method == 'mpd':
+            import multiprocessing_on_dill as mpd
+            pool = mpd.Pool(self.njobs)
+        elif method == 'pathos':
+            from pathos.pools import ProcessPool
+            pool = ProcessPool(nodes=self.njobs)
+            
+        else:
+            assert False, f"unkonwn method: {method}"
+        
+        # fill in edge_credit
         edge_credit_list = pool.map(self.wrap_run,
                                     [self.cf for _ in range(self.njobs)])
+        
 
         # combine edge credits
         name2node = dict((node.name, node) for node in self.cf.graph)
@@ -651,7 +677,7 @@ class ParallelCreditFlow(CreditFlow):
 
     def draw_asv(self, *args, **kwargs):
         return self.cf.draw_asv(*args, **kwargs)
-        
+
 class GraphExplainer:
 
     def __init__(self, graph, X, nruns=100):
@@ -868,6 +894,21 @@ class GraphExplainer:
 
 ##### helper functions
 # graph visualization
+def dill_run(cf_str):
+    cf = dill.loads(cf_str)
+    cf.run()
+
+    edge_credit = {}
+    for node1, d in cf.edge_credit.items():
+        for node2, val in d.items():
+            if node1.name not in edge_credit:
+                edge_credit[node1.name] = {}
+            if node2.name not in edge_credit[node1.name]:
+                edge_credit[node1.name][node2.name] = 0
+            edge_credit[node1.name][node2.name] += val
+
+    return edge_credit
+    
 def viz_graph(G):
     '''only applicable in ipython notebook setting 
     convert G (pygraphviz) to graphviz format and display with 
@@ -1163,6 +1204,10 @@ def build_graph():
                   {'x1': lambda: 1})
     
     return graph
+
+# other utility functions
+def unique_filename(dir):
+    return os.path.join(dir, str(uuid.uuid4()))
 
 # sample runs
 def example_detailed():
