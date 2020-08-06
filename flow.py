@@ -12,10 +12,20 @@ from collections.abc import Iterable
 import tqdm
 import joblib
 import dill
-dill.settings['recurse'] = True # important for reloading with dill
 import multiprocessing as mp
-if mp.get_start_method(allow_none=True) != "spawn":
-    mp.set_start_method("spawn") # important for not deadlock with numpy
+
+def multiprocessing_setup():
+    if mp.get_start_method(allow_none=True) != "spawn":
+        if mp.get_start_method(allow_none=True) is not None:
+            warnings.warn("cannot set multiprocessing to spawn, \
+            use ParallelCreditFlow with caution")
+        else:
+            # important for not deadlock with numpy for using dill
+            mp.set_start_method("spawn")
+
+    dill.settings['recurse'] = True # important for reloading with dill
+    
+multiprocessing_setup()
 
 class GraphIterator:
     def __init__(self, graph):
@@ -500,7 +510,7 @@ class CreditFlow:
         return self.credit2dot_pygraphviz(edge_credit, format_str,
                                           idx, max_display)
 
-class ParallelCreditFlow(CreditFlow):
+class ParallelCreditFlow:
     
     def __init__(self, graph, nruns=10, njobs=1, fold_noise=True):
         ''' 
@@ -510,10 +520,7 @@ class ParallelCreditFlow(CreditFlow):
         nruns: number of sampled valid timelines and permutations
         fold_noise: whether to show noise node as a point
         njobs: number of parallel jobs
-        '''
-        self.temp_dir = "tmp"
-        os.system(f'mkdir -p {self.temp_dir}')
-        
+        '''        
         njobs = min(nruns, njobs)
         self.cf = CreditFlow(graph,
                              nruns=nruns // njobs,
@@ -551,12 +558,16 @@ class ParallelCreditFlow(CreditFlow):
         3. serialize its output with dill and print to output
         4. use subprocess to capture the output and convert back to dict
         '''
-        fns = [unique_filename(self.temp_dir) for _ in range(self.njobs + 1)]
+        pwd = os.path.dirname(os.path.realpath(__file__))
+        temp_dir = f"{pwd}/tmp"
+        os.system(f'mkdir -p {temp_dir}')
+        
+        fns = [unique_filename(temp_dir) for _ in range(self.njobs + 1)]
         with open(fns[0], 'wb') as f:
             dill.dump(self.cf, f)
 
         procs = []
-        commands = [["python", "wrap_run.py", fns[0], fns[i+1]]\
+        commands = [["python", f"{pwd}/wrap_run.py", fns[0], fns[i+1]]\
                     for i in range(self.njobs)]
         for i, command in enumerate(commands):
             p = subprocess.Popen(command)
@@ -584,16 +595,20 @@ class ParallelCreditFlow(CreditFlow):
                         [name2node[node2_name]] +=  val / len(edge_credit_list)
 
         # clean up temp files
-        subprocess.Popen(['rm', f"{self.tmp_dir}/*"])
+        subprocess.Popen(['rm', f"{temp_dir}/*"])
 
     def run_dill(self):
         '''
-        first use dill to 
-        workaround for dealing with deadlock
-
+        multi-processing can avoid deadlock by using the "spawn" method,
+        but, it doesn't pickle closures correctly. This method uses dill
+        to do the pickling and then attempt to set "spawn" if possible
         problem: still not fast, similar speed as subprocess
         '''
 
+        if mp.get_start_method(allow_none=True) != "spawn":
+            warnings.warn("May deadlock with numpy! Plz set\
+            multiprocessing: mp.set_start_method('spawn')")
+            
         pool = mp.Pool(self.njobs)
         cf_str = dill.dumps(self.cf)
         edge_credit_list = pool.map(dill_run,
@@ -648,7 +663,7 @@ class ParallelCreditFlow(CreditFlow):
 
         Therefore this function cannot work with multi threading
         '''
-        warnings.warn("May deadlock with numpy!", DeprecationWarning)
+        warnings.warn("May deadlock with numpy!")
         if method == 'mpd':
             import multiprocessing_on_dill as mpd
             pool = mpd.Pool(self.njobs)
