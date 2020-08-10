@@ -1,4 +1,5 @@
-import subprocess, time, select, os, uuid, warnings
+import subprocess, time, select, os, uuid, warnings, itertools
+import math
 import numpy as np
 import pandas as pd
 from collections import defaultdict
@@ -104,7 +105,7 @@ class Graph:
         sample from a sampler
         if the sampled data is not an iterable, make it so
         '''
-        # todo: prefetch this and also just reuse the same bg for all targets
+        # later: prefetch this and also just reuse the same bg for all targets
         s = sampler[name]()
         if not isinstance(s, Iterable):
             s = [s]
@@ -189,7 +190,7 @@ class Node:
         self.last_val = self.baseline
         self.val = self.baseline
         self.from_node = None
-        
+
     def add_arg(self, node):
         '''add predecessor, allow multi edge'''
         self.args.append(node)
@@ -226,12 +227,16 @@ class CreditFlow:
             self.verbose = False
             self.visualize = False
 
-    def draw(self, idx=-1, max_display=None, format_str="{:.2f}"):
+    def draw(self, idx=-1, max_display=None, format_str="{:.2f}",
+             edge_credit=None):
         '''
         assumes using ipython notebook
         idx: index to draw, <0 means using the summary abs mean plot
         '''
-        viz_graph(self.credit2dot(format_str=format_str,
+        if edge_credit is None:
+            edge_credit= self.edge_credit
+        viz_graph(self.credit2dot(edge_credit,
+                                  format_str=format_str,
                                   idx=idx,
                                   max_display=max_display))
 
@@ -260,6 +265,27 @@ class CreditFlow:
                                        idx, max_display)
         viz_graph(G)
         
+    def viz_graph_init(self, graph):
+        '''
+        initialize self.dot with the graph structure
+        '''
+        dot = AGraph(directed=True)
+        for node in topo_sort(graph):
+            if node not in dot:
+                dot.add_node(node,
+                             label=f"{node.name}: {node.val[0]:.1f} ({node.baseline[0]:.1f}->{node.target[0]:.1f})")
+            for p in node.args:
+                dot.add_edge(p, node)
+
+        self.dot = dot
+        viz_graph(self.dot)
+
+    def reset(self):
+        '''reset the graph and initialize the visualization'''
+        self.graph.reset()
+        if self.visualize:
+            self.viz_graph_init(self.graph)        
+
     def credit(self, node, val):
         if node is None or node.from_node is None:
             return
@@ -323,27 +349,6 @@ class CreditFlow:
                 
             self.dfs(c, order)
 
-    def viz_graph_init(self, graph):
-        '''
-        initialize self.dot with the graph structure
-        '''
-        dot = AGraph(directed=True)
-        for node in topo_sort(graph):
-            if node not in dot:
-                dot.add_node(node,
-                             label=f"{node.name}: {node.val[0]:.1f} ({node.baseline[0]:.1f}->{node.target[0]:.1f})")
-            for p in node.args:
-                dot.add_edge(p, node)
-
-        self.dot = dot
-        viz_graph(self.dot)
-
-    def reset(self):
-        '''reset the graph and initialize the visualization'''
-        self.graph.reset()
-        if self.visualize:
-            self.viz_graph_init(self.graph)
-        
     def run(self):
         '''
         run shap flow algorithm to fairly allocate credit
@@ -480,20 +485,22 @@ class CreditFlow:
                         f"{red}{alpha}"
         return G
         
-    def credit2dot(self, format_str="{:.2f}", idx=-1, max_display=None):
+    def credit2dot(self, raw_edge_credit,
+                   format_str="{:.2f}", idx=-1, max_display=None):
         '''
         convert the graph to pydot graph for visualization
         e.g.:
         G = cf.credit2dot()
         viz_graph(G)
 
+        raw_edge_credit: edge_credit with potentiall multi edges
         idx: the index of target to visualize, if negative assumes sum
         max_display: max number of edges attribution to display
         '''
         edge_credit = defaultdict(lambda: defaultdict(int))
         
         # simplify for dummy intermediate node for multi-graph
-        for node1, d in self.edge_credit.items():
+        for node1, d in raw_edge_credit.items():
             for node2, val in d.items():
                 if node1.is_dummy_node:
                     continue # should be covered in the next case
@@ -655,7 +662,7 @@ class ParallelCreditFlow:
         deadlock can be solved by changing from "fork" to "spawn", but mpd
         does not work with "spawn"
 
-        todo: investigate how to let it work with spawn
+        later: investigate how to let it work with spawn
 
         method:
         'mpd': multiprocessing-on-dill
@@ -963,6 +970,15 @@ def translator(names, X, X_display):
     return res
 
 # graph algorithm
+def group_nodes(input_nodes, output_nodes):
+    '''
+    use input_nodes to predict output_nodes
+    place an intermediate node as the concatenation of output_nodes
+    also concatentate the respective noise node
+    todo
+    '''
+    pass
+
 def get_source_nodes(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
     sources = [node for node in graph if indegrees[node] == 0]
@@ -1201,6 +1217,108 @@ def hcluster_graph(graph, source_names, cluster_matrix, verbose=False):
     graph.reset()
     return graph
 
+# other utility functions
+def unique_filename(dir):
+    return os.path.join(dir, str(uuid.uuid4()))
+
+# experimental functions
+def run_divide_and_conquer(graph, k=-1, verbose=False):
+    '''
+    divide and conquer implementation of Shapley Flow
+    output an edge credit dictionary
+    
+    k: number of samplings, if k<0, we compute the exact ordering
+    '''
+
+    # todo: this is wrong
+    edge_credit = defaultdict(lambda: defaultdict(int))    
+    def run(node, level=0):
+
+        if len(node.children) == 0: # leaf node
+            n = node
+            credit = node.val - node.last_val
+            while n.from_node is not None:
+                if verbose:
+                    print('\t' * level + f'give {n.from_node}->{n} {credit} credits')
+                edge_credit[n.from_node][n] += credit
+                n = n.from_node
+
+        if k < 0: #or k >= math.factorial(len(node.children)):
+            permutations = itertools.permutations(node.children)
+        else:
+            permutations = iter([np.random.permutation(node.children) \
+                                 for _ in range(k)])
+
+        def save_state(node, state):
+            # record original settings from the node and downward
+            if len(node.children) == 0: return
+            for c in node.children:
+                state[c] = {}
+                state[c]['from_state'] = c.from_node
+                state[c]['last_val'] = c.last_val
+                state[c]['visible_val'] = dict((n, v) for n, v in\
+                                               c.visible_arg_values.items())
+                state[c]['val'] = c.val
+                save_state(c, state)
+
+        state = {}
+        save_state(node, state)
+        if verbose:
+            print('\t' * level + f'state at {node}', state)
+
+        def load_state(node, state):
+            if len(node.children) == 0: return
+            for c in node.children:
+                c.from_node = state[c]['from_state']
+                c.last_val = state[c]['last_val']
+                c.visible_arg_values = state[c]['visible_val']
+                c.val = state[c]['val']
+                load_state(c, state)
+
+        idx = 0
+        for children_order in permutations:
+            if verbose:
+                print('\t' * level + f'permutation at {node}:', children_order)
+
+            if len(node.args) == 0:
+                graph.reset() # reset baselines at source
+                if verbose:
+                    print('\t' * level + f'turn on {node} from {node.baseline}->{node.target}')
+                node.val = node.target # turn on the source node
+                
+                idx += 1
+                if verbose:
+                    print('\t' * level + f"run {idx}")
+
+            # restore to original state
+            load_state(node, state)
+            if verbose:
+                print('\t' * level + f'loaded state at {node}', state)            
+
+            # update the value
+            for c in children_order:
+                if verbose:
+                    print('\t' * level,  dict([(n.name, n.val) for n in graph]))
+                c.from_node = node
+                c.last_val = c.val
+                c.visible_arg_values[node] = node.val
+                c.val = c.f(*[c.visible_arg_values[arg] for arg in c.args])
+                if verbose:
+                    print('\t' * level, f'{c}', c.visible_arg_values)
+                    print('\t' * level + f'turn on {node}->{c}')
+                    print('\t' * level + f'{c} changed from {c.last_val} to {c.val}')
+                run(c, level+1)
+
+    # preprocess the graph
+    sources = get_source_nodes(graph)
+    if len(sources) > 1: # add an artificial source node
+        graph = single_source_graph(graph)
+        sources = get_source_nodes(graph)
+    
+    # run the algorithm
+    run(sources[0])
+    return edge_credit
+        
 # sample graph
 def build_graph():
     '''
@@ -1219,10 +1337,6 @@ def build_graph():
                   {'x1': lambda: 1})
     
     return graph
-
-# other utility functions
-def unique_filename(dir):
-    return os.path.join(dir, str(uuid.uuid4()))
 
 # sample runs
 def example_detailed():
