@@ -1,3 +1,5 @@
+This note provide a guide for different implementations of Shapley Flow.
+
 * exact algorithm is not practical for a dense graph
 
   Consider a full graph of one timeline with n features.
@@ -39,16 +41,16 @@
 
   - sample a source to target path to compute attribution
   - follow edges in the path from the source to the target; for each edge
-    - making all input visible, set its sources' non active branches to random
-      values and propagate its values downwards (run the eval function following a
-      topological ordering)
+    - making all input visible, set random set of its sources' non active branches to
+      background values and propagate its values downwards (run the eval
+      function following a topological ordering)
     - compute the new value for the edge's sink node, assuming all inputs are visible
-  - attribute the change output to the path
+  - attribute the change in output to the path
 
   Note that each sampling requires at most $n$ evaluation of the graph because
   the path length is at most $n$. This is a lot cheaper
-  
-* efficient for balanced tree with small branching factor
+
+* efficient divide and conquer solution for balanced tree with small branching factor
 
   For a balanced tree with n nodes, with a branching factor b
 
@@ -77,4 +79,65 @@
 
   This is a vast improvement over the $O(2^n)$ complexity of flat Shapley value.
 
+* Time complexity of implementations
 
+  There are several ways to implement Shapley Flow. Assume we have n nodes, each
+  node has $e_i$ number of outgoing edge, and $p$ source to target path. We also
+  consider the special case of balanced tree with branching factor $b$. For
+  sampling approaches, we denote the number of samplers as k. Denote longest
+  path length as l (note $l \leq n$).
+
+** brute force: exact solution
+
+  The brute force way of computing Shapley Flow involves trying all possible
+  combinations of outgoing edges for each node, which gives exponential amount
+  of orderings to compute. For each ordering, we need to traverse all possible
+  paths in the specified order.
+
+  - Time complexity in general: $O(\Pi_{i=1}^n e_i) p$
+  - Time complexity for balanced tree: $O(b^n n)$
+
+** divide and conquer: exact solution
+
+   This is the strategy employed for efficient implementation of balanced
+   tree. The output at each level is an edge contribution dictionary. This
+   method assumes that path ordering for the impact of edges that share the same
+   stem does not matter.
+
+   - Time complexity for general case: $O(n!)$
+   - Time complexity for balanced tree: $O(n^b)$
+
+** sampling of path: approximation
+
+   This is described earlier. This approach may break the efficiency axiom, but
+   is fast.
+
+   - Time complexity for general case: $O(k \times l)$
+   - Time complexity for balanced tree: $O(k log_b(n))$
+
+** sampling of ordering: approximation
+
+   In this case, we randomly permute edge ordering for each node and perform
+   full updates for each sampled ordering. As shown earlier, $p$ could be very
+   large. Therefore this approach does not work for dense graph, but it
+   maintains the efficiency axiom.
+
+   - Time complexity for general case: $O(k p)$
+   - Time complexity for balanced tree: $O(k n)$
+
+   This is the currently implemented approach.
+
+** cache
+
+   There are repeated computation to be exploited. Consider the graph (a->b,
+   a->c, b->d, b->e), if we already know the ordering of (a->b->e, a->b->d,
+   a->c), the ordering (a->b->d, a->b->e, a->c) wouldn't tell us anything new
+   about the path contribution of (a->c), therefore we can just add the previous
+   contribution (a->c) to update its current value without computing (a->c)
+   again. This seems trivial in this case, but if c has many downstream nodes,
+   we don't need to compute them all together.
+
+   This should improve the efficiency over all previous approaches except for
+   the sampling of path because if we apply it to sampling of path, we are
+   essentially not allowing the same path to be sampled again, which may not be
+   desirable.
