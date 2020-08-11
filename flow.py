@@ -208,6 +208,7 @@ class CreditFlow:
         graph: causal graph to explain
         verbose: whether to print out decision process        
         nruns: number of sampled valid timelines and permutations
+               if negative, will compute exactly
         visualize: whether to visualize the graph build process, 
                    need to be verbose
         fold_noise: whether to show noise node as a point
@@ -348,8 +349,8 @@ class CreditFlow:
                         dot_c.attr['color'] = "green"
                 
             self.dfs(c, order)
-
-    def run(self):
+            
+    def run_bruteforce_sampling(self):
         '''
         run shap flow algorithm to fairly allocate credit
         '''
@@ -358,7 +359,7 @@ class CreditFlow:
         if self.silent:
             run_range = range(self.nruns)            
         else:
-            run_range = tqdm.trange(self.nruns, desc='sampling')
+            run_range = tqdm.trange(self.nruns, desc='bruteforce sampling')
         
         for i in run_range:
             # make value back to baselines
@@ -397,11 +398,35 @@ class CreditFlow:
                         
                 self.dfs(node, order)
 
+        # normalize edge credit
+        for node1, v in self.edge_credit.items():
+            for node2 in v:
+                v[node2] = v[node2] / self.nruns
+
+    def run(self, method='bruteforce_sampling', len_bg=1):
+        '''
+        run shapley flow algorithm
+        method: different method to run the approach
+        len_bg: number of background samples, default to 1
+        '''
+        if method == 'bruteforce_sampling':
+            assert self.nruns > 0, f"{method} does not support negative nruns, plz try divide_and_conquer"
+            self.run_bruteforce_sampling()
+        elif method == 'divide_and_conquer':
+            assert self.visualize == False, f'{method} does not support visualize'
+            if len_bg > 10:
+                warnings.warn(f"len_bg={len_bg} will be slow, please lower len_bg")
+            ec = run_divide_and_conquer(self.graph, self.nruns, self.verbose,
+                                        len_bg=len_bg)
+            self.edge_credit = ec
+        else:
+            assert False, f"unknown method: {method}"
+    
     def print_credit(self, edge_credit=None):
         if edge_credit is None: edge_credit = self.edge_credit
         for node1, d in edge_credit.items():
             for node2, val in d.items():
-                print(f'credit {node1}->{node2}: {val/self.nruns}')
+                print(f'credit {node1}->{node2}: {val}')
 
 
     def credit2dot_pygraphviz(self, edge_credit, format_str, idx=-1,
@@ -413,11 +438,11 @@ class CreditFlow:
         G = AGraph(directed=True)
 
         edge_values = []
-        max_v = 0
+        max_v = 1e-6 # avoid division by zero error
         for node1, d in edge_credit.items():
             for node2, val in d.items():
-                max_v = max(abs(val/self.nruns), max_v)
-                edge_values.append(abs(val/self.nruns))
+                max_v = max(abs(val), max_v)
+                edge_values.append(abs(val))
 
         edge_values = sorted(edge_values)
         if max_display is None or max_display >= len(edge_values):
@@ -428,7 +453,7 @@ class CreditFlow:
         for node1, d in edge_credit.items():
             for node2, val in d.items():
                 
-                v = val/self.nruns
+                v = val
                 edge_label = format_str.format(v)
                 if abs(v) < min_v: continue
 
@@ -896,7 +921,7 @@ class GraphExplainer:
                                          for i, name in enumerate(names))
         self.set_noise_sampler()
         
-    def shap_values(self, X):
+    def shap_values(self, X, method='bruteforce_sampling'):
         """ Estimate the SHAP values for a set of samples.
 
         Parameters
@@ -904,6 +929,7 @@ class GraphExplainer:
         X : pandas.DataFrame
             A matrix of samples (# samples x # features) on which to explain 
             the model's output.
+        method: see credit flow run method
 
         Returns
         -------
@@ -911,7 +937,7 @@ class GraphExplainer:
         """
         self.prepare_graph(X)
         cf = CreditFlow(self.graph, nruns=self.nruns)
-        cf.run()
+        cf.run(method, len_bg=len(self.bg))
         return cf
 
 ##### helper functions
@@ -1221,25 +1247,30 @@ def hcluster_graph(graph, source_names, cluster_matrix, verbose=False):
 def unique_filename(dir):
     return os.path.join(dir, str(uuid.uuid4()))
 
-# experimental functions
-def run_divide_and_conquer(graph, k=-1, verbose=False):
+# other implementations of shap flow
+def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
     '''
     divide and conquer implementation of Shapley Flow
     output an edge credit dictionary
     
     k: number of samplings, if k<0, we compute the exact ordering
+    len_bg: number of baseline settings, usually just len(bg)
     '''
 
-    def run(node, level=0):
+    def run(node, level, len_bg):
 
         edge_credit = defaultdict(lambda: defaultdict(int))
         if len(node.children) == 0: # leaf node
             credit = node.val - node.last_val            
             return {node.from_node: {node: credit}}
 
-        if k < 0 or k >= math.factorial(len(node.children)):
-            permutations = itertools.permutations(node.children)
-            nruns = len(node.children) # this many evaluations for each edge
+        if k < 0 or k >= math.factorial(len(node.children)) * len_bg:
+            permutations = itertools.chain.from_iterable(
+                itertools.permutations(node.children) for _ in range(len_bg)
+            )
+
+            # this many evaluations for each edge
+            nruns = len(node.children) * len_bg
         else:
             permutations = iter([np.random.permutation(node.children) \
                                  for _ in range(k)])
@@ -1273,18 +1304,19 @@ def run_divide_and_conquer(graph, k=-1, verbose=False):
             if verbose:
                 print('\t' * level + f'permutation at {node}:', children_order)
 
+            # restore to original state
+            load_state(node, state)
+
+            # reset all settings at source
             if len(node.args) == 0:
-                # todo: think about the correct way to do when baseline is
-                # a distribution
+                # later: note: for exact computation of multipel baselines, we
+                # need to compute for each baseline instead of sampling
                 graph.reset() # reset baselines at source
                 if verbose:
                     print('\t' * level + f'turn on {node} from {node.baseline}->{node.target}')
                 node.val = node.target # turn on the source node
                 if verbose:
                     print('\t' * level + f"run {_i}")
-
-            # restore to original state
-            load_state(node, state)
 
             # update the value
             for c in children_order:
@@ -1298,7 +1330,7 @@ def run_divide_and_conquer(graph, k=-1, verbose=False):
                     print('\t' * level, f'{c}', c.visible_arg_values)
                     print('\t' * level + f'turn on {node}->{c}')
                     print('\t' * level + f'{c} changed from {c.last_val} to {c.val}')
-                ec = run(c, level+1)
+                ec = run(c, level+1, len_bg)
 
                 def print_credit(edge_credit, level):
                     for node1, d in edge_credit.items():
@@ -1326,8 +1358,8 @@ def run_divide_and_conquer(graph, k=-1, verbose=False):
         sources = get_source_nodes(graph)
     
     # run the algorithm
-    return run(sources[0])
-        
+    return run(sources[0], 0, len_bg)
+
 # sample graph
 def build_graph():
     '''
