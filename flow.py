@@ -1230,24 +1230,20 @@ def run_divide_and_conquer(graph, k=-1, verbose=False):
     k: number of samplings, if k<0, we compute the exact ordering
     '''
 
-    # todo: this is wrong
-    edge_credit = defaultdict(lambda: defaultdict(int))    
     def run(node, level=0):
 
+        edge_credit = defaultdict(lambda: defaultdict(int))
         if len(node.children) == 0: # leaf node
-            n = node
-            credit = node.val - node.last_val
-            while n.from_node is not None:
-                if verbose:
-                    print('\t' * level + f'give {n.from_node}->{n} {credit} credits')
-                edge_credit[n.from_node][n] += credit
-                n = n.from_node
+            credit = node.val - node.last_val            
+            return {node.from_node: {node: credit}}
 
-        if k < 0: #or k >= math.factorial(len(node.children)):
+        if k < 0 or k >= math.factorial(len(node.children)):
             permutations = itertools.permutations(node.children)
+            nruns = len(node.children) # this many evaluations for each edge
         else:
             permutations = iter([np.random.permutation(node.children) \
                                  for _ in range(k)])
+            nruns = k
 
         def save_state(node, state):
             # record original settings from the node and downward
@@ -1263,8 +1259,6 @@ def run_divide_and_conquer(graph, k=-1, verbose=False):
 
         state = {}
         save_state(node, state)
-        if verbose:
-            print('\t' * level + f'state at {node}', state)
 
         def load_state(node, state):
             if len(node.children) == 0: return
@@ -1275,25 +1269,22 @@ def run_divide_and_conquer(graph, k=-1, verbose=False):
                 c.val = state[c]['val']
                 load_state(c, state)
 
-        idx = 0
-        for children_order in permutations:
+        for _i, children_order in enumerate(permutations):
             if verbose:
                 print('\t' * level + f'permutation at {node}:', children_order)
 
             if len(node.args) == 0:
+                # todo: think about the correct way to do when baseline is
+                # a distribution
                 graph.reset() # reset baselines at source
                 if verbose:
                     print('\t' * level + f'turn on {node} from {node.baseline}->{node.target}')
                 node.val = node.target # turn on the source node
-                
-                idx += 1
                 if verbose:
-                    print('\t' * level + f"run {idx}")
+                    print('\t' * level + f"run {_i}")
 
             # restore to original state
             load_state(node, state)
-            if verbose:
-                print('\t' * level + f'loaded state at {node}', state)            
 
             # update the value
             for c in children_order:
@@ -1307,7 +1298,26 @@ def run_divide_and_conquer(graph, k=-1, verbose=False):
                     print('\t' * level, f'{c}', c.visible_arg_values)
                     print('\t' * level + f'turn on {node}->{c}')
                     print('\t' * level + f'{c} changed from {c.last_val} to {c.val}')
-                run(c, level+1)
+                ec = run(c, level+1)
+
+                def print_credit(edge_credit, level):
+                    for node1, d in edge_credit.items():
+                        for node2, val in d.items():
+                            print('\t' * level, f'credit {node1}->{node2}: {val}')
+                
+                if verbose:
+                    print_credit(ec, level)
+
+                # update edge credit of all upstream nodes of the current node
+                for node1, v in ec.items():
+                    for node2, credit in v.items():
+                        edge_credit[node1][node2] += credit / nruns
+                                
+                credit = np.vstack([ec[node][c] for c in node.children if c in ec[node]]).sum(0)
+                if node.from_node is not None:
+                    edge_credit[node.from_node][node] += credit/ nruns
+                
+        return edge_credit
 
     # preprocess the graph
     sources = get_source_nodes(graph)
@@ -1316,8 +1326,7 @@ def run_divide_and_conquer(graph, k=-1, verbose=False):
         sources = get_source_nodes(graph)
     
     # run the algorithm
-    run(sources[0])
-    return edge_credit
+    return run(sources[0])
         
 # sample graph
 def build_graph():
