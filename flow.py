@@ -13,6 +13,7 @@ import copy
 from collections.abc import Iterable
 from collections import defaultdict
 import multiprocessing as mp
+from functools import partial
 import numpy as np
 import pandas as pd
 from pygraphviz import AGraph
@@ -1020,7 +1021,6 @@ class GraphExplainer:
                                 lower[zero_loc] = 0
                                 return lower, upper
                             
-
                             def wrap_fg_sampler(lower_prob, upper_prob):
                                 ''' 
                                 lower_prob, upper_prob: output of prob_range
@@ -1074,6 +1074,9 @@ class GraphExplainer:
         X : pandas.DataFrame
             A matrix of samples (# samples x # features) on which to explain 
             the model's output.
+
+        this function prepares the baseline_sampler and target_sampler
+        and set up the noise terms
         '''
         assert isinstance(X, pd.DataFrame), \
             "assume data frame with column names matching node names"
@@ -1168,14 +1171,113 @@ def translator(names, X, X_display):
     return res
 
 # graph algorithm
-def group_nodes(input_nodes, output_nodes):
+def group_nodes(graph, nodes, name):
     '''
-    use input_nodes to predict output_nodes
-    place an intermediate node as the concatenation of output_nodes
-    also concatentate the respective noise node
-    todo
-    '''
-    pass
+    Goup nodes into a single node that determines the value of each node in nodes.
+    Also groups the noise term for each node.
+
+    This function should be called after graph has been constructed and prepared
+    with the appropriate noise nodes
+
+    1. create a new noise node that combines the noise nodes of nodes
+    2. create a new node as the concatenation of output_nodes
+    3. reset output nodes' dependency from input_nodes to the concatenation nodes
+    4. rewire input_nodes' children
+    5. check DAG holds after grouping: throw exception if not hold
+
+    todo: check the correctness of this implementation
+    '''  
+    
+    def get_input_nodes(nodes):
+        '''
+        return input nodes after combine
+        '''
+        input_nodes = set()
+        for node in nodes:
+            for n in node.args:
+                if n not in nodes:
+                    input_nodes.add(n)
+        return input_nodes
+
+    def check_DAG(graph):
+        '''
+        see if topological sort successfully find an order
+        '''
+        return len(topo_sort(graph)) == len(graph)
+
+    sorted_nodes = topo_sort(graph)
+    node2sorted_idx = {node: i for i, node in enumerate(sorted_nodes)}
+    # remove duplicate nodes
+    nodes = set(nodes)
+    # get input nodes
+    input_nodes = get_input_nodes(nodes)
+    noise_nodes = [n for n in input_nodes if n.is_noise_node]
+    non_noise_input_nodes = [n for n in input_nodes if not n.is_noise_node]
+    # sort nodes by topological order
+    nodes = sorted(list(nodes), key=lambda n: node2sorted_idx[n])
+
+    # combine noise nodes: todo: check if no noise node
+    noise_node = Node(name + " noise", is_noise_node=True)
+    graph.add_node(noise_node)
+
+    def wrap_noise_sampler(noise_nodes_names, sampler):
+        def f_():
+            return {n: sampler(n) for n in noise_nodes_names}
+        return f_
+
+    noise_nodes_names = [n.name for n in noise_nodes]
+    graph.baseline_sampler[noise_node.name] = wrap_noise_sampler(
+        noise_nodes_names,
+        partial(graph.sample, graph.baseline_sampler))
+    graph.target_sampler[noise_node.name] = wrap_noise_sampler(
+        noise_nodes_names,
+        partial(graph.sample, graph.target_sampler))
+    
+    # combine nodes
+    args = [noise_node] + non_noise_input_nodes
+    def create_f(input_nodes, nodes):
+        '''
+        assume nodes are topologically sorted
+
+        input_nodes and args are in the same ordering
+        output a dictionary of {nodes names: nodes values}
+        '''
+        def f(*args):
+            assert len(input_nodes) == len(args), "input nodes and ars mismatch"
+            vals = {} # name to value
+            for n, v in zip(input_nodes, args):
+                if n.is_noise_node:
+                    # open the combined noise node
+                    for noise_name in v:
+                        vals[noise_name] = v[noise_name]
+                else:
+                    vals[n.name] = v
+
+            res = {}
+            for n in nodes:
+                res[n.name] = n.f(*[vals[a.name] for a in n.args])
+                vals[n.name] = res[n.name] # nodes may have inner dependencies
+            
+            return res
+        return f
+
+    # need deepcopy of nodes because later will change the nodes
+    node = Node(name, create_f(args, copy.deepcopy(nodes)), args)
+    
+    # rewire nodes to only depend on node
+    for n in nodes:
+        n.args = [node]
+        def wrap_f(name):
+            return lambda *args: args[0][name]
+        n.f = wrap_f(n.name)
+
+    # rewire input nodes
+    for n in input_nodes:
+        n.children = [node]
+
+    # check cycle
+    assert check_DAG(graph), "grouping the nodes results in cycle in graph"
+    return graph
 
 def get_source_nodes(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
@@ -1190,10 +1292,9 @@ def topo_sort(graph):
     indegrees = dict((node, len(node.args)) for node in graph)
     sources = [node for node in graph if indegrees[node] == 0]
     while sources:
-        sources = list(np.random.permutation(sources))
         s = sources.pop()
         order.append(s)
-        for u in np.random.permutation(s.children):
+        for u in s.children:
             indegrees[u] -= 1 # s is satisfied
             if indegrees[u] == 0:
                 sources.append(u)
