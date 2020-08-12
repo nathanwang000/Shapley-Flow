@@ -1487,11 +1487,12 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
                 c.val = state[c]['val']
                 load_state(c, state)
 
-        run_range = enumerate(permutations)
+        run_range = range(nruns)
         if level == 0:
             run_range = tqdm.tqdm(run_range,
                                   desc=f"divide_and_conquer at level {level}")
-        for _i, children_order in run_range:
+        for _i in run_range:
+            children_order = next(permutations)
             if verbose:
                 print('\t' * level + f'permutation at {node}:', children_order)
 
@@ -1506,8 +1507,6 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
                 if verbose:
                     print('\t' * level + f'turn on {node} from {node.baseline}->{node.target}')
                 node.val = node.target # turn on the source node
-                if verbose:
-                    print('\t' * level + f"run {_i}")
 
             # update the value
             for c in children_order:
