@@ -1,21 +1,31 @@
-import subprocess, time, select, os, uuid, warnings, itertools
+'''
+This file contains implementation of the Shapley Flow algorithm
+Author: Jiaxuan Wang
+'''
+import subprocess
+import time
+import os
+import uuid
+import warnings
+import itertools
 import math
+import copy
+from collections.abc import Iterable
+from collections import defaultdict
+import multiprocessing as mp
 import numpy as np
 import pandas as pd
-from collections import defaultdict
-import matplotlib.pyplot as plt
-import networkx as nx
-import copy
-import warnings
 from pygraphviz import AGraph
-from graphviz import Digraph, Source
-from collections.abc import Iterable
+from graphviz import Source
 import tqdm
 import joblib
 import dill
-import multiprocessing as mp
 
 def multiprocessing_setup():
+    '''
+    deal with deadlock using fork in mp due to not
+    copying threads form numpy
+    '''
     if mp.get_start_method(allow_none=True) != "spawn":
         if mp.get_start_method(allow_none=True) is not None:
             warnings.warn("cannot set multiprocessing to spawn, \
@@ -25,10 +35,13 @@ def multiprocessing_setup():
             mp.set_start_method("spawn")
 
     dill.settings['recurse'] = True # important for reloading with dill
-    
+
 multiprocessing_setup()
 
 class GraphIterator:
+    '''
+    iterator for nodes in a graph
+    '''
     def __init__(self, graph):
         self._graph = graph
         self._index = 0 # keep track of current index
@@ -85,7 +98,7 @@ class Graph:
                         G.add_node(node, label=node.name)
 
                 G.add_edge(node2, node1)
-                
+
         return G
 
     def draw(self):
@@ -93,24 +106,25 @@ class Graph:
         requires in ipython notebook environment
         '''
         viz_graph(self.to_graphviz())
-        
+
     def add_node(self, node):
         '''
         add a node to nodes
         '''
         self.nodes.append(node)
-        
+
     def sample(self, sampler, name):
         '''
         sample from a sampler
         if the sampled data is not an iterable, make it so
         '''
-        # later: prefetch this and also just reuse the same bg for all targets
+        # later: prefetch this and also just reuse the same bg for
+        # all targets
         s = sampler[name]()
         if not isinstance(s, Iterable):
             s = [s]
         return np.array(s)
-    
+
     def sample_all(self, sampler):
         '''
         sampler could be baseline sampler or target sampler
@@ -120,7 +134,7 @@ class Graph:
         for name in sampler:
             d[name] = self.sample(sampler, name)
         return d
-            
+
     def reset(self):
 
         baseline_values = self.sample_all(self.baseline_sampler)
@@ -239,7 +253,8 @@ class CreditFlow:
              edge_credit=None):
         '''
         assumes using ipython notebook
-        idx: index to draw, <0 means using the summary abs mean plot
+        idx: the index of target to visualize, if negative assumes sum,
+             if an iterable, assumes sum over the list of values
         '''
         if edge_credit is None:
             edge_credit= self.edge_credit
@@ -252,7 +267,8 @@ class CreditFlow:
         '''
         asv view only shows impact of source features
         assumes using ipython notebook
-        idx: index to draw, <0 means using the summary abs mean plot
+        idx: the index of target to visualize, if negative assumes sum,
+             if an iterable, assumes sum over the list of values
         '''
         edge_credit = defaultdict(lambda: defaultdict(int))
         target_node = [node for node in self.graph if node.is_target_node][0]
@@ -451,7 +467,7 @@ class CreditFlow:
         else:
             run_range = tqdm.trange(self.nruns, desc='bruteforce sampling')
         
-        for i in run_range:
+        for _ in run_range:
             # make value back to baselines
             self.reset()
             
@@ -489,7 +505,7 @@ class CreditFlow:
                 self.dfs_set(node)
 
         # normalize edge credit
-        for node1, v in self.edge_credit.items():
+        for _, v in self.edge_credit.items():
             for node2 in v:
                 v[node2] = v[node2] / self.nruns
     
@@ -505,7 +521,7 @@ class CreditFlow:
         else:
             run_range = tqdm.trange(self.nruns, desc='bruteforce sampling')
         
-        for i in run_range:
+        for _ in run_range:
             # make value back to baselines
             self.reset()
             
@@ -543,7 +559,7 @@ class CreditFlow:
                 self.dfs(node)
 
         # normalize edge credit
-        for node1, v in self.edge_credit.items():
+        for _, v in self.edge_credit.items():
             for node2 in v:
                 v[node2] = v[node2] / self.nruns
 
@@ -577,6 +593,7 @@ class CreditFlow:
                               max_display=None):
         '''
         pygraphviz version of credit2dot
+
         idx: the index of target to visualize, if negative assumes sum
         '''
         G = AGraph(directed=True)
@@ -629,7 +646,7 @@ class CreditFlow:
                             else:
                                 txt = self.graph.display_translator\
                                     [node.name](node.target[idx])
-                                if type(txt) is str:
+                                if isinstance(txt, str):
                                     fmt = "{}: {}"
                                 else:
                                     fmt = "{}: " + format_str
@@ -663,40 +680,53 @@ class CreditFlow:
         viz_graph(G)
 
         raw_edge_credit: edge_credit with potentiall multi edges
-        idx: the index of target to visualize, if negative assumes sum
+        idx: the index of target to visualize, if negative assumes sum,
+             if an iterable, assumes sum over the list of values
         max_display: max number of edges attribution to display
         '''
         edge_credit = defaultdict(lambda: defaultdict(int))
+
+        if isinstance(idx, Iterable):
+            if len(idx) == 1:
+                idx = idx[0]
+                new_idx = idx
+            else:
+                new_idx = -1 # set downstream task to aggregate
+        else:
+            new_idx = idx
         
         # simplify for dummy intermediate node for multi-graph
         for node1, d in raw_edge_credit.items():
             for node2, val in d.items():
                 if node1.is_dummy_node:
+                    # dummy node has one child and one parent
                     continue # should be covered in the next case
                 if node2.is_dummy_node:
-                    node2 = node2.children[0]
+                    node2 = node2.children[0] 
 
-                if idx < 0 and len(val) == 1:
-                    idx = 0
-                if idx < 0:
-                    edge_credit[node1][node2] += np.mean(np.abs(val))
+                # set aggregate or individual mode
+                if isinstance(idx, Iterable):
+                    edge_credit[node1][node2] += np.mean(np.abs(val[idx]))
                 else:
-                    edge_credit[node1][node2] += val[idx]
+                    if idx < 0:
+                        edge_credit[node1][node2] += np.mean(np.abs(val))
+                    else:
+                        edge_credit[node1][node2] += val[idx]
 
         return self.credit2dot_pygraphviz(edge_credit, format_str,
-                                          idx, max_display)
+                                          new_idx, max_display)
 
 class ParallelCreditFlow:
-    
-    def __init__(self, graph, nruns=10, njobs=1, fold_noise=True):
-        ''' 
+    '''
         An embarassingly parallel implementaion of credit flow
 
         graph: causal graph to explain
         nruns: number of sampled valid timelines and permutations
         fold_noise: whether to show noise node as a point
         njobs: number of parallel jobs
-        '''        
+    '''
+    
+    def __init__(self, graph, nruns=10, njobs=1, fold_noise=True):
         njobs = min(nruns, njobs)
         self.cf = CreditFlow(graph,
                              nruns=nruns // njobs,
@@ -745,7 +775,7 @@ class ParallelCreditFlow:
         procs = []
         commands = [["python", f"{pwd}/wrap_run.py", fns[0], fns[i+1]]\
                     for i in range(self.njobs)]
-        for i, command in enumerate(commands):
+        for command in commands:
             p = subprocess.Popen(command)
             procs.append(p)
 
@@ -796,7 +826,7 @@ class ParallelCreditFlow:
             for node1_name, d in edge_credit.items():
                 for node2_name, val in d.items():
                     self.cf.edge_credit[name2node[node1_name]]\
-                        [name2node[node2_name]] +=  val / len(edge_credit_list)
+                        [name2node[node2_name]] += val / len(edge_credit_list)
 
     def run_thread(self):
         '''
@@ -823,7 +853,7 @@ class ParallelCreditFlow:
         '''
         best for the random synthetic data
         
-        problem: 
+        problem:
         - may deadlock due to numpy's lock
         - labmda not work with mp and joblib
         - mp_on_dill does not work with "spawn"
@@ -877,13 +907,11 @@ class GraphExplainer:
         X: background value samples from X, assumes dataframe
         nruns: how many runs for each data point
         '''
-        assert type(X) == pd.DataFrame, \
+        assert isinstance(X, pd.DataFrame), \
             "assume data frame with column names matching node names"
         
         self.graph = copy.deepcopy(graph)
         self.nruns = nruns
-        assert type(X) == pd.DataFrame, \
-            "assume data frame with column names matching node names"
         self.bg = X        
         
     def _idx_f(self, idx, f):
@@ -1047,7 +1075,7 @@ class GraphExplainer:
             A matrix of samples (# samples x # features) on which to explain 
             the model's output.
         '''
-        assert type(X) == pd.DataFrame, \
+        assert isinstance(X, pd.DataFrame), \
             "assume data frame with column names matching node names"
         assert (self.bg.columns == X.columns).all(), "feature names must match"
         self.fg = X
@@ -1388,8 +1416,8 @@ def hcluster_graph(graph, source_names, cluster_matrix, verbose=False):
     return graph
 
 # other utility functions
-def unique_filename(dir):
-    return os.path.join(dir, str(uuid.uuid4()))
+def unique_filename(directory):
+    return os.path.join(directory, str(uuid.uuid4()))
 
 # other implementations of shap flow
 def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
@@ -1670,14 +1698,14 @@ def build_graph():
     x1 = Node('x1')
     x2 = Node('x2', lambda x1: x1, [x1])
     y  = Node('target', lambda x1, x2: x1 + x2, [x1, x2], is_target_node=True)
-    
+
     # initialize the values from data: now is just specified
     graph = Graph([x1, x2, y],
                   # sample baseline
                   {'x1': lambda: 0},
                   # target to explain
                   {'x1': lambda: 1})
-    
+
     return graph
 
 # sample runs
@@ -1685,7 +1713,7 @@ def example_detailed():
     ''' 
     an example with detailed control over the algorithm
     '''
-    graph = build_graph()    
+    graph = build_graph()
     cf = CreditFlow(graph, verbose=False, nruns=1)
     cf.run()
     cf.print_credit() # cf.draw() if using ipython notebook
@@ -1698,6 +1726,6 @@ def example_concise():
     explainer = GraphExplainer(graph, pd.DataFrame.from_dict({'x1': [0]}))
     cf = explainer.shap_values(pd.DataFrame.from_dict({'x1': [1]}))
     cf.print_credit() # cf.draw() if using ipython notebook
-    
+
 if __name__ == '__main__':
     example_concise()
