@@ -139,6 +139,7 @@ class Graph:
 
             for c in node.children: # only activated edges change visibility
                 c.visible_arg_values[node] = node.baseline
+                c.activated_args[node] = False
 
             n_targets += node.is_target_node
 
@@ -174,7 +175,8 @@ class Node:
         self.is_categorical = is_categorical
 
         # arg values that are visible to the node
-        self.visible_arg_values = {}
+        self.visible_arg_values = {} # DEPRECATED for path activation definition
+        self.activated_args = dict((arg, False) for arg in args)
         
         self.args = []
         for arg in args:
@@ -215,6 +217,11 @@ class CreditFlow:
         silent: if true, overwrite visualize and verbose to False
                 and does not show progress bar
         '''
+        # compute once to avoid compute again
+        self.sorted_nodes = topo_sort(graph)
+        self.node2sorted_idx = dict((node, i) for i, node in \
+                                    enumerate(self.sorted_nodes))
+        
         self.graph = graph
         self.edge_credit = defaultdict(lambda: defaultdict(int))
         self.verbose = verbose
@@ -285,7 +292,7 @@ class CreditFlow:
         '''reset the graph and initialize the visualization'''
         self.graph.reset()
         if self.visualize:
-            self.viz_graph_init(self.graph)        
+            self.viz_graph_init(self.graph)
 
     def credit(self, node, val):
         if node is None or node.from_node is None:
@@ -311,7 +318,12 @@ class CreditFlow:
                 
         self.credit(node.from_node, val) # propagate upward
 
-    def dfs(self, node, order):
+    
+    def dfs(self, node):
+        '''
+        deprecated for the new definition
+        '''
+        warnings.warn("DEPRECATED!")        
         if node.is_target_node:
             self.credit(node, node.val - node.last_val)
             return
@@ -348,12 +360,144 @@ class CreditFlow:
                     elif c.val == c.target:
                         dot_c.attr['color'] = "green"
                 
-            self.dfs(c, order)
+            self.dfs(c)
+
+    def dfs_set(self, node, update_root=None):
+        '''
+        the most up to date implementation
+        update_root: root node needing update
+        '''
+        if node.is_target_node:
+            # evaluate all the changes due to newly opened edges
+            assert update_root is not None, "should have some node needing update"
+
+            # identify nodes need to be updated
+            # an alternative implementation is update every node after update_root
+            # later: compare the two approaches
+            nodes_to_update = [update_root]
+            frontier = [update_root]
+            visited = set([update_root])
+            while len(frontier) > 0:
+                n = frontier.pop()
+                for c in n.children:
+                    if c not in visited and c.activated_args[n]:
+                        visited.add(c)
+                        frontier.append(c)
+                        nodes_to_update.append(c)
+
+            nodes_to_update = sorted(nodes_to_update,
+                                     key=lambda n: self.node2sorted_idx[n])
+            if self.verbose:
+                print("nodes to update", nodes_to_update)
+
+            # update nodes
+            for n in nodes_to_update:
+                n.last_val = n.val
+                n.val = n.f(*[(arg.val if n.activated_args[arg] else arg.baseline)
+                              for arg in n.args])
+                if self.verbose:
+                    for a in n.args:
+                        print(f"{n} has {a}: {n.activated_args[a]} with val {a.val}")
+                    print(f"{n} update from {n.last_val} to {n.val}")
+                
+            self.credit(node, node.val - node.last_val)
+            return
+
+        children_order = np.random.permutation(node.children)
+        for c in children_order:
+
+            # find the root of update
+            if update_root is None and not c.activated_args[node]:
+                new_update_root = c
+            else:
+                new_update_root = update_root
+                
+            c.from_node = node
+            c.activated_args[node] = True
             
+            if self.verbose:
+                print(f'turn on edge {node}->{c}')                
+                if self.visualize:
+                    if not self.dot.has_edge(node, c):
+                        self.dot.add_edge(node, c)
+                    dot_edge = self.dot.get_edge(node, c)
+                    dot_edge.attr['color'] = "orange"
+                    dot_c = self.dot.get_node(c)
+                    label = dot_c.attr['label']
+                    dot_c.attr['label'] = f"{label.split(':')[0]}: {c.val[0]:.1f} ({c.baseline[0]:.1f}->{c.target[0]:.1f})"
+                    dot_c_color = dot_c.attr['color']
+                    dot_edge.attr['penwidth'] = self.penwidth_stress
+                    dot_c.attr['penwidth'] = self.penwidth_stress
+                    dot_c.attr['color'] = 'orange'
+                    viz_graph(self.dot)
+                    dot_edge.attr['penwidth'] = self.penwidth_normal
+                    dot_c.attr['penwidth'] = self.penwidth_normal
+                    dot_edge.attr['color'] = "black"
+                    if c.val == c.baseline:
+                        dot_c.attr['color'] = dot_c_color or "black"
+                    elif c.val == c.target:
+                        dot_c.attr['color'] = "green"
+                
+            self.dfs_set(c, new_update_root)
+
+    def run_bruteforce_sampling_set(self):
+        '''
+        run shap flow algorithm to fairly allocate credit
+        '''
+        # random sample valid timelines
+        sources = get_source_nodes(self.graph)
+        if self.silent:
+            run_range = range(self.nruns)            
+        else:
+            run_range = tqdm.trange(self.nruns, desc='bruteforce sampling')
+        
+        for i in run_range:
+            # make value back to baselines
+            self.reset()
+            
+            order = list(np.random.permutation(sources))
+            if self.verbose:
+                print(f"\n----> using order {order}")
+                print("baselines " +\
+                      ", ".join(map(lambda node: f"{node}: {node.last_val[0]}",
+                                    order)))
+            # follow the order
+            for node in order:
+                node.last_val = node.val # update last val
+                node.val = node.target # turn on the node
+                node.from_node = None # turn off the source
+
+                if self.verbose:
+                    print(f"turn on edge from external source to {node}")
+                    print(f"{node} changes from {node.last_val[0]} to {node.val[0]}")
+                    if self.visualize:
+                        if node not in self.dot:
+                            self.dot.add_node(node)
+                        dot_node = self.dot.get_node(node)
+                        label = dot_node.attr['label']
+                        dot_node.attr['label'] = f"{label.split(':')[0]}: {node.val[0]:.1f} ({node.baseline[0]:.1f}->{node.target[0]:.1f})"
+                        dot_node.attr['penwidth'] = self.penwidth_stress
+                        dot_node_color = dot_node.attr['color']
+                        dot_node.attr['color'] = 'orange'
+                        viz_graph(self.dot)
+                        dot_node.attr['penwidth'] = self.penwidth_normal
+                        if node.val == node.baseline:
+                            dot_node.attr['color'] = dot_node_color or "black"
+                        elif node.val == node.target:
+                            dot_node.attr['color'] = "green"
+                        
+                self.dfs_set(node)
+
+        # normalize edge credit
+        for node1, v in self.edge_credit.items():
+            for node2 in v:
+                v[node2] = v[node2] / self.nruns
+    
     def run_bruteforce_sampling(self):
         '''
         run shap flow algorithm to fairly allocate credit
         '''
+        warnings.warn("DEPRECATED!")        
         sources = get_source_nodes(self.graph)
         # random sample valid timelines
         if self.silent:
@@ -396,7 +540,7 @@ class CreditFlow:
                         elif node.val == node.target:
                             dot_node.attr['color'] = "green"
                         
-                self.dfs(node, order)
+                self.dfs(node)
 
         # normalize edge credit
         for node1, v in self.edge_credit.items():
@@ -411,13 +555,13 @@ class CreditFlow:
         '''
         if method == 'bruteforce_sampling':
             assert self.nruns > 0, f"{method} does not support negative nruns, plz try divide_and_conquer"
-            self.run_bruteforce_sampling()
+            self.run_bruteforce_sampling_set()
         elif method == 'divide_and_conquer':
             assert self.visualize == False, f'{method} does not support visualize'
             if len_bg > 10:
                 warnings.warn(f"len_bg={len_bg} will be slow, please lower len_bg")
-            ec = run_divide_and_conquer(self.graph, self.nruns, self.verbose,
-                                        len_bg=len_bg)
+            ec = run_divide_and_conquer_set(self.graph, self.nruns, self.verbose,
+                                            len_bg=len_bg)
             self.edge_credit = ec
         else:
             assert False, f"unknown method: {method}"
@@ -1248,6 +1392,165 @@ def unique_filename(dir):
     return os.path.join(dir, str(uuid.uuid4()))
 
 # other implementations of shap flow
+def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
+    '''
+    divide and conquer implementation of Shapley Flow
+    output an edge credit dictionary
+    
+    k: number of samplings, if k<0, we compute the exact ordering
+    len_bg: number of baseline settings, usually just len(bg)
+    '''
+    # preprocess the graph
+    graph = single_source_graph(graph)
+    graph.reset() # reset baselines at source
+    sources = get_source_nodes(graph)
+    sorted_nodes = topo_sort(graph)
+    node2sorted_idx = dict((n, i) for i, n in enumerate(sorted_nodes))
+    
+    def run(node, level, len_bg, update_root=None):
+        '''
+        update_root: root node needing update
+        '''
+
+        edge_credit = defaultdict(lambda: defaultdict(int))
+        if node.is_target_node:
+
+            # evaluate all the changes due to newly opened edges
+            assert update_root is not None, "should have some node needing update"
+
+            # identify nodes need to be updated
+            # an alternative implementation is update every node after update_root
+            # later: compare the two approaches
+            nodes_to_update = [update_root]
+            frontier = [update_root]
+            visited = set([update_root])
+            while len(frontier) > 0:
+                n = frontier.pop()
+                for c in n.children:
+                    if c not in visited and c.activated_args[n]:
+                        visited.add(c)
+                        frontier.append(c)
+                        nodes_to_update.append(c)
+
+            nodes_to_update = sorted(nodes_to_update,
+                                     key=lambda n: node2sorted_idx[n])
+            if verbose:
+                print("nodes to update", nodes_to_update)
+
+            # update nodes
+            for n in nodes_to_update:
+                n.last_val = n.val
+                n.val = n.f(*[(arg.val if n.activated_args[arg] else arg.baseline)
+                              for arg in n.args])
+                if verbose:
+                    for a in n.args:
+                        print(f"{n} has {a}: {n.activated_args[a]} with val {a.val}")
+                    print(f"{n} update from {n.last_val} to {n.val}")
+            
+            credit = node.val - node.last_val            
+            return {node.from_node: {node: credit}}
+
+        if k < 0 or k >= math.factorial(len(node.children)) * len_bg:
+            # later: optimize this to be 2^b instead of b!
+            permutations = itertools.chain.from_iterable(
+                itertools.permutations(node.children) for _ in range(len_bg)
+            )
+
+            # this many evaluations for each edge
+            nruns = math.factorial(len(node.children)) * len_bg
+        else:
+            permutations = iter([np.random.permutation(node.children) \
+                                 for _ in range(k)])
+            nruns = k
+
+        def save_state(node, state):
+            # record original settings from the node and downward
+            if len(node.children) == 0: return
+            for c in node.children:
+                state[c] = {}
+                state[c]['from_node'] = c.from_node
+                state[c]['last_val'] = c.last_val
+                state[c]['activated_args'] = dict((n, v) for n, v in\
+                                                  c.activated_args.items())
+                state[c]['val'] = c.val
+                save_state(c, state)
+
+        state = {}
+        save_state(node, state)
+
+        def load_state(node, state):
+            if len(node.children) == 0: return
+            for c in node.children:
+                c.from_node = state[c]['from_node']
+                c.last_val = state[c]['last_val']
+                c.activated_args = state[c]['activated_args']
+                c.val = state[c]['val']
+                load_state(c, state)
+
+        run_range = enumerate(permutations)
+        if level == 0:
+            run_range = tqdm.tqdm(run_range,
+                                  desc=f"divide_and_conquer at level {level}")
+        for _i, children_order in run_range:
+            if verbose:
+                print('\t' * level + f'permutation at {node}:', children_order)
+
+            # restore to original state
+            load_state(node, state)
+
+            # reset all settings at source
+            if len(node.args) == 0:
+                # later: note: for exact computation of multipel baselines, we
+                # need to compute for each baseline instead of sampling
+                graph.reset() # reset baselines at source
+                if verbose:
+                    print('\t' * level + f'turn on {node} from {node.baseline}->{node.target}')
+                node.val = node.target # turn on the source node
+                if verbose:
+                    print('\t' * level + f"run {_i}")
+
+            # update the value
+            for c in children_order:
+                if verbose:
+                    print('\t' * level,  dict([(n.name, n.val) for n in graph]))
+
+                # find the root of update
+                if update_root is None and not c.activated_args[node]:
+                    new_update_root = c
+                else:
+                    new_update_root = update_root
+                    
+                c.from_node = node
+                c.activated_args[node] = True
+
+                if verbose:
+                    print('\t' * level + f'turn on {node}->{c}')
+                    
+                ec = run(c, level+1, len_bg, new_update_root)
+
+                def print_credit(edge_credit, level):
+                    for node1, d in edge_credit.items():
+                        for node2, val in d.items():
+                            print('\t' * level, f'credit {node1}->{node2}: {val}')
+                
+                if verbose:
+                    print_credit(ec, level)
+
+                # update edge credit of all upstream nodes of the current node
+                for node1, v in ec.items():
+                    for node2, credit in v.items():
+                        edge_credit[node1][node2] += credit / nruns
+                                
+                credit = np.vstack([ec[node][c] for c in node.children if c in ec[node]]).sum(0)
+                if node.from_node is not None:
+                    edge_credit[node.from_node][node] += credit/ nruns
+                
+        return edge_credit
+
+    
+    # run the algorithm
+    return run(sources[0], 0, len_bg, None)
+
 def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
     '''
     divide and conquer implementation of Shapley Flow
@@ -1256,7 +1559,7 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
     k: number of samplings, if k<0, we compute the exact ordering
     len_bg: number of baseline settings, usually just len(bg)
     '''
-
+    warnings.warn("DEPRECATED!")
     def run(node, level, len_bg):
 
         edge_credit = defaultdict(lambda: defaultdict(int))
@@ -1270,7 +1573,7 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
             )
 
             # this many evaluations for each edge
-            nruns = len(node.children) * len_bg
+            nruns = math.factorial(len(node.children)) * len_bg
         else:
             permutations = iter([np.random.permutation(node.children) \
                                  for _ in range(k)])
@@ -1281,7 +1584,7 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
             if len(node.children) == 0: return
             for c in node.children:
                 state[c] = {}
-                state[c]['from_state'] = c.from_node
+                state[c]['from_node'] = c.from_node
                 state[c]['last_val'] = c.last_val
                 state[c]['visible_val'] = dict((n, v) for n, v in\
                                                c.visible_arg_values.items())
@@ -1294,7 +1597,7 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
         def load_state(node, state):
             if len(node.children) == 0: return
             for c in node.children:
-                c.from_node = state[c]['from_state']
+                c.from_node = state[c]['from_node']
                 c.last_val = state[c]['last_val']
                 c.visible_arg_values = state[c]['visible_val']
                 c.val = state[c]['val']
@@ -1352,10 +1655,9 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
         return edge_credit
 
     # preprocess the graph
+    graph = single_source_graph(graph)
+    graph.reset()
     sources = get_source_nodes(graph)
-    if len(sources) > 1: # add an artificial source node
-        graph = single_source_graph(graph)
-        sources = get_source_nodes(graph)
     
     # run the algorithm
     return run(sources[0], 0, len_bg)
