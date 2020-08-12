@@ -16,3 +16,8 @@
 
    The [[./sanity_check_graphs.ipynb][notebook]] contains sanity check graphs for various flow approaches.
 
+** python version
+
+   requires python3.8.2
+
+   requirements are listed in requirements.txt
