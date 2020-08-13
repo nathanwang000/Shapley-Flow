@@ -122,6 +122,9 @@ class Graph:
         # later: prefetch this and also just reuse the same bg for
         # all targets
         s = sampler[name]()
+
+        if isinstance(s, dict):
+            return s
         if not isinstance(s, Iterable):
             s = [s]
         return np.array(s)
@@ -642,7 +645,7 @@ class CreditFlow:
                             G.add_node(node, shape="point")
                         else:
                             shape = 'box' if node.is_categorical else 'ellipse'
-                            if idx < 0:
+                            if idx < 0 or not isinstance(node.target, np.ndarray):
                                 G.add_node(node, label=node.name, shape=shape)
                             else:
                                 txt = self.graph.display_translator\
@@ -1096,7 +1099,7 @@ class GraphExplainer:
                                          for i, name in enumerate(names))
         self.set_noise_sampler()
         
-    def shap_values(self, X, method='bruteforce_sampling'):
+    def shap_values(self, X, method='bruteforce_sampling', skip_prepare=False):
         """ Estimate the SHAP values for a set of samples.
 
         Parameters
@@ -1110,7 +1113,9 @@ class GraphExplainer:
         -------
         a credit flow object
         """
-        self.prepare_graph(X)
+        # todo: think about how to more elegantly do this
+        if not skip_prepare:
+            self.prepare_graph(X)
         cf = CreditFlow(self.graph, nruns=self.nruns)
         cf.run(method, len_bg=len(self.bg))
         return cf
@@ -1171,7 +1176,29 @@ def translator(names, X, X_display):
     return res
 
 # graph algorithm
-def group_nodes(graph, nodes, name):
+def check_DAG(graph):
+    '''
+    see if topological sort successfully find an order
+    '''
+    return len(topo_sort(graph)) == len(graph)
+
+def check_child_args_consistency(graph):
+    '''
+    see if parent and children relationship matches
+    '''
+    for node in graph:
+        if len(node.children) != len(set(node.children)):
+            return False
+        for n in node.children:
+            if node not in n.args:
+                return False
+        for n in node.args:
+            if node not in n.children:
+                return False
+
+    return True
+    
+def group_nodes(graph, nodes, name, verbose=False):
     '''
     Goup nodes into a single node that determines the value of each node in nodes.
     Also groups the noise term for each node.
@@ -1199,12 +1226,6 @@ def group_nodes(graph, nodes, name):
                     input_nodes.add(n)
         return input_nodes
 
-    def check_DAG(graph):
-        '''
-        see if topological sort successfully find an order
-        '''
-        return len(topo_sort(graph)) == len(graph)
-
     sorted_nodes = topo_sort(graph)
     node2sorted_idx = {node: i for i, node in enumerate(sorted_nodes)}
     # remove duplicate nodes
@@ -1226,6 +1247,8 @@ def group_nodes(graph, nodes, name):
         return f_
 
     noise_nodes_names = [n.name for n in noise_nodes]
+    if verbose:
+        print("noise nodes", noise_nodes_names)
     graph.baseline_sampler[noise_node.name] = wrap_noise_sampler(
         noise_nodes_names,
         partial(graph.sample, graph.baseline_sampler))
@@ -1234,7 +1257,6 @@ def group_nodes(graph, nodes, name):
         partial(graph.sample, graph.target_sampler))
     
     # combine nodes
-    args = [noise_node] + non_noise_input_nodes
     def create_f(input_nodes, nodes):
         '''
         assume nodes are topologically sorted
@@ -1248,7 +1270,7 @@ def group_nodes(graph, nodes, name):
             for n, v in zip(input_nodes, args):
                 if n.is_noise_node:
                     # open the combined noise node
-                    for noise_name in v:
+                    for noise_name in v.keys():
                         vals[noise_name] = v[noise_name]
                 else:
                     vals[n.name] = v
@@ -1261,8 +1283,11 @@ def group_nodes(graph, nodes, name):
             return res
         return f
 
+    args = [noise_node] + non_noise_input_nodes    
     # need deepcopy of nodes because later will change the nodes
     node = Node(name, create_f(args, copy.deepcopy(nodes)), args)
+    node.children = nodes
+    graph.add_node(node)
     
     # rewire nodes to only depend on node
     for n in nodes:
@@ -1271,12 +1296,17 @@ def group_nodes(graph, nodes, name):
             return lambda *args: args[0][name]
         n.f = wrap_f(n.name)
 
-    # rewire input nodes
-    for n in input_nodes:
-        n.children = [node]
+    # rewire input nodes's children to exclude nodes
+    # don't need to add node because node is automatically added
+    for n in non_noise_input_nodes:
+        n.children = [_n for _n in n.children if _n not in nodes]
 
+    # remove the original noise nodes
+    graph.nodes = [n for n in graph.nodes if n not in noise_nodes]
+    
     # check cycle
     assert check_DAG(graph), "grouping the nodes results in cycle in graph"
+    assert check_child_args_consistency(graph), "child args not consistent"
     return graph
 
 def get_source_nodes(graph):
@@ -1291,6 +1321,7 @@ def topo_sort(graph):
     order = []
     indegrees = dict((node, len(node.args)) for node in graph)
     sources = [node for node in graph if indegrees[node] == 0]
+
     while sources:
         s = sources.pop()
         order.append(s)
