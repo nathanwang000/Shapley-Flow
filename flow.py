@@ -14,6 +14,7 @@ from collections.abc import Iterable
 from collections import defaultdict
 import multiprocessing as mp
 from functools import partial
+import xgboost
 import numpy as np
 import pandas as pd
 from pygraphviz import AGraph
@@ -21,6 +22,7 @@ from graphviz import Source
 import tqdm
 import joblib
 import dill
+from sklearn.model_selection import train_test_split
 
 def multiprocessing_setup():
     '''
@@ -57,6 +59,30 @@ class GraphIterator:
         # end of iteration
         raise StopIteration
 
+class CausalLinks:
+    '''
+    a class to store causal links: both cause and effect are names of features
+    '''
+    def __init__(self):
+        self.items = []
+
+    def add_causes_effects(self, causes, effects, models=[]):
+        '''
+        each model in models assumes can be run with model() to get output
+        see create_xgboost_f as to how to prepare a model
+        '''
+        if not isinstance(causes, list):
+            causes = [causes]
+        if not isinstance(effects, list):
+            effects = [effects]
+        if not isinstance(models, list):
+            models = [models]
+
+        assert len(models) == 0 or len(models) == len(effects), \
+            f"must specify {len(effects)} models"
+        
+        self.items.append((causes, effects, models))
+    
 class Graph:
     '''list of nodes'''
     def __init__(self, nodes, baseline_sampler={}, target_sampler={},
@@ -86,6 +112,86 @@ class Graph:
     def __iter__(self):
         return GraphIterator(self)
 
+    def add_links(self, links):
+        '''
+        links: CausalLinks object
+        
+        a helper function to build the graph, functions can be fitted later
+        with self.fit_missing_links(X)
+        '''
+        # todo: open this later
+        # assert isinstance(links, CausalLinks), f"links must of type CausalLinks}"
+        for causes, effects, models in links.items:
+            len_causes = len(causes)
+            len_effects = len(effects)
+            # add args in the same order as specified
+            causes = sorted([n for n in self.nodes if n.name in causes],
+                            key=lambda n: causes.index(n.name))
+            effects = [n for n in self.nodes if n.name in effects]
+            assert len_causes == len(causes), "not all causes in graph.nodes"
+            assert len_effects == len(effects), "not all effects in graph.nodes"
+
+            for i, e in enumerate(effects):
+                for c in causes:
+                    if c not in e.args:
+                        e.args.append(c)
+
+                    if e not in c.children:
+                        c.children.append(e)
+
+                if len(models) == len(effects):
+                    e.f = models[i]
+                else:
+                    e.f = None
+
+        assert check_child_args_consistency(self), "child parent not consistent"
+        assert check_DAG(self), "not a dag anymore"
+
+    def fit_missing_links(self, X):
+        '''
+        X is assumed to be a dataframe
+
+        the columns of X should contain features of nodes that haven't been fit
+        this function fit those links with an xgboost model
+        '''
+
+        nodes_to_learn = [n for n in self.nodes \
+                          if n.f is None and len(n.args) != 0]
+        pbar = tqdm.tqdm(nodes_to_learn)
+        for node in pbar:
+            pbar.set_description(f'learning dependency for {node.name}')
+
+            # learn a new model here
+            X_train, X_test, y_train, y_test = train_test_split(
+                X[[p.name for p in node.args]],
+                np.array(X[node.name]), test_size=0.2, random_state=42)
+            xgb_train = xgboost.DMatrix(X_train, label=y_train)
+            xgb_test = xgboost.DMatrix(X_test, label=y_test)
+
+            if node.is_categorical:
+                num_class = len(np.unique(X[name]))
+                params = {
+                    "eta": 0.002,
+                    "max_depth": 3,
+                    'objective': 'multi:softprob',
+                    'eval_metric': 'mlogloss',
+                    'num_class': num_class,
+                    "subsample": 0.5
+                }
+            else:
+                params = {
+                    "eta": 0.002,
+                    "max_depth": 3,
+                    'objective': 'reg:squarederror',
+                    'eval_metric': 'rmse',
+                    "subsample": 0.5
+                }
+            m = xgboost.train(params, xgb_train, 500,
+                              evals = [(xgb_test, "test")],
+                              verbose_eval=100) # False)
+
+            node.f = create_xgboost_f([a.name for a in node.args], m)
+                
     def to_graphviz(self):
         '''
         convert to graphviz format
@@ -141,6 +247,8 @@ class Graph:
 
     def reset(self):
 
+        assert check_unique_node_names(self), "node names not unique"
+        
         baseline_values = self.sample_all(self.baseline_sampler)
         target_values = self.sample_all(self.target_sampler)
 
@@ -1113,15 +1221,36 @@ class GraphExplainer:
         -------
         a credit flow object
         """
-        # todo: think about how to more elegantly do this
         if not skip_prepare:
-            self.prepare_graph(X)
+            try:
+                self.prepare_graph(X)
+            except Exception as e:
+                # later: think about how to more elegantly do this
+                warnings.warn("maybe you want to skip prepare")
+                raise e
+            
         cf = CreditFlow(self.graph, nruns=self.nruns)
         cf.run(method, len_bg=len(self.bg))
         return cf
 
 ##### helper functions
 # graph visualization
+def create_xgboost_f(parents, m):
+    '''
+    assume m is a xgboost model
+    parents are list of feature names
+    '''
+    def f_(*args):
+        bs = len(args[0])
+        o = m.predict(xgboost.DMatrix(pd.DataFrame.from_dict(
+            {n: args[i] for i, n in enumerate(parents)})))
+
+        if len(o) != bs: # discrete case
+            o = o.reshape(bs, -1)
+        return o
+
+    return f_
+
 def dill_run(cf_str):
     cf = dill.loads(cf_str)
     cf.run()
@@ -1175,7 +1304,13 @@ def translator(names, X, X_display):
         res[name] = f(X[i], X_display[i])
     return res
 
-# graph algorithm
+# graph algorithms
+def check_unique_node_names(graph):
+    '''
+    check node names in a graph is unique
+    '''
+    return len(set(n.name for n in graph)) == len(graph)
+    
 def check_DAG(graph):
     '''
     see if topological sort successfully find an order
@@ -1211,8 +1346,6 @@ def group_nodes(graph, nodes, name, verbose=False):
     3. reset output nodes' dependency from input_nodes to the concatenation nodes
     4. rewire input_nodes' children
     5. check DAG holds after grouping: throw exception if not hold
-
-    todo: check the correctness of this implementation
     '''  
     
     def get_input_nodes(nodes):
@@ -1237,7 +1370,7 @@ def group_nodes(graph, nodes, name, verbose=False):
     # sort nodes by topological order
     nodes = sorted(list(nodes), key=lambda n: node2sorted_idx[n])
 
-    # combine noise nodes: todo: check if no noise node
+    # combine noise nodes:
     noise_node = Node(name + " noise", is_noise_node=True)
     graph.add_node(noise_node)
 
@@ -1547,7 +1680,7 @@ def hcluster_graph(graph, source_names, cluster_matrix, verbose=False):
     graph.reset()
     return graph
 
-# other utility functions
+# file related functions
 def unique_filename(directory):
     return os.path.join(directory, str(uuid.uuid4()))
 
@@ -1821,8 +1954,31 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
     # run the algorithm
     return run(sources[0], 0, len_bg)
 
+# helper for building graphs
 # sample graph
-def build_graph():
+def build_feature_graph(X, causal_links, categorical_feature_names=[],
+                        display_translator={}, target_name='prediction'):
+    '''
+    build and return a graph (list of nodes), to be runnable in main
+    
+    X: background distribution (n, d) dataframe object
+    causal_links: object of type CausalLinks from flow.py
+    categorical_feature_names: feature names of categorical variables
+    display_translator: translate features values to readable format, see 
+                        flow.py:translator
+    target_name: name of the target prediction
+    '''
+    names = X.columns
+    nodes = [Node(name, is_categorical=(name in categorical_feature_names))\
+             for name in names]
+    nodes.append(Node(target_name, is_target_node=True))
+    
+    graph = Graph(nodes, display_translator=display_translator)
+    graph.add_links(causal_links)
+    graph.fit_missing_links(X)
+    return graph
+
+def sample_build_graph():
     '''
     build and return a graph (list of nodes), to be runnable in main
     '''
@@ -1845,7 +2001,7 @@ def example_detailed():
     ''' 
     an example with detailed control over the algorithm
     '''
-    graph = build_graph()
+    graph = sample_build_graph()
     cf = CreditFlow(graph, verbose=False, nruns=1)
     cf.run()
     cf.print_credit() # cf.draw() if using ipython notebook
@@ -1854,7 +2010,7 @@ def example_concise():
     '''
     an example with recommended way of running the module
     '''
-    graph = build_graph()
+    graph = sample_build_graph()
     explainer = GraphExplainer(graph, pd.DataFrame.from_dict({'x1': [0]}))
     cf = explainer.shap_values(pd.DataFrame.from_dict({'x1': [1]}))
     cf.print_credit() # cf.draw() if using ipython notebook
