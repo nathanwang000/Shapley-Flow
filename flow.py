@@ -119,8 +119,7 @@ class Graph:
         a helper function to build the graph, functions can be fitted later
         with self.fit_missing_links(X)
         '''
-        # todo: open this later
-        # assert isinstance(links, CausalLinks), f"links must of type CausalLinks}"
+        # assert isinstance(links, CausalLinks), f"links must of type {CausalLinks}"
         for causes, effects, models in links.items:
             len_causes = len(causes)
             len_effects = len(effects)
@@ -385,20 +384,31 @@ class CreditFlow:
         edge_credit = defaultdict(lambda: defaultdict(int))
         target_node = [node for node in self.graph if node.is_target_node][0]
         
-        # fold non source node
+        if isinstance(idx, Iterable):
+            if len(idx) == 1:
+                idx = idx[0]
+                new_idx = idx
+            else:
+                new_idx = -1 # set downstream task to aggregate
+        else:
+            new_idx = idx
+
+        # fold non source node        
         for node1, d in self.edge_credit.items():
             for node2, val in d.items():
                 if len(node1.args) > 0: continue
 
-                if idx < 0 and len(val) == 1:
-                    idx = 0
-                if idx < 0:
-                    edge_credit[node1][target_node] += np.mean(np.abs(val))
+                # set aggregate or individual mode
+                if isinstance(idx, Iterable):
+                    edge_credit[node1][target_node] += np.mean(np.abs(val[idx]))
                 else:
-                    edge_credit[node1][target_node] += val[idx]
+                    if idx < 0:
+                        edge_credit[node1][target_node] += np.mean(np.abs(val))
+                    else:
+                        edge_credit[node1][target_node] += val[idx]
                 
         G = self.credit2dot_pygraphviz(edge_credit, format_str,
-                                       idx, max_display)
+                                       new_idx, max_display)
         viz_graph(G)
         
     def viz_graph_init(self, graph):
@@ -497,8 +507,12 @@ class CreditFlow:
         '''
         if node.is_target_node:
             # evaluate all the changes due to newly opened edges
-            assert update_root is not None, "should have some node needing update"
-
+            if self.verbose:
+                print(f"update root is {update_root}")
+            
+            if update_root is None:
+                return # nothing to update
+                
             # identify nodes need to be updated
             # an alternative implementation is update every node after update_root
             # later: compare the two approaches
@@ -567,6 +581,7 @@ class CreditFlow:
                         dot_c.attr['color'] = "green"
                 
             self.dfs_set(c, new_update_root)
+            update_root = None # already updated upstream nodes
 
     def run_bruteforce_sampling_set(self):
         '''
@@ -1708,9 +1723,13 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
         edge_credit = defaultdict(lambda: defaultdict(int))
         if node.is_target_node:
 
+            if verbose:
+                print('\t' * level + f"update root is {update_root}")
+            
             # evaluate all the changes due to newly opened edges
-            assert update_root is not None, "should have some node needing update"
-
+            if update_root is None:
+                return {}
+                
             # identify nodes need to be updated
             # an alternative implementation is update every node after update_root
             # later: compare the two approaches
@@ -1728,7 +1747,7 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
             nodes_to_update = sorted(nodes_to_update,
                                      key=lambda n: node2sorted_idx[n])
             if verbose:
-                print("nodes to update", nodes_to_update)
+                print('\t' * level + "nodes to update", nodes_to_update)
 
             # update nodes
             for n in nodes_to_update:
@@ -1737,8 +1756,9 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
                               for arg in n.args])
                 if verbose:
                     for a in n.args:
-                        print(f"{n} has {a}: {n.activated_args[a]} with val {a.val}")
-                    print(f"{n} update from {n.last_val} to {n.val}")
+                        print('\t' * level + \
+                              f"{n} has {a}: {n.activated_args[a]} with val {a.val}")
+                    print('\t' * level + f"{n} update from {n.last_val} to {n.val}")
             
             credit = node.val - node.last_val            
             return {node.from_node: {node: credit}}
@@ -1792,6 +1812,13 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
             # restore to original state
             load_state(node, state)
 
+            if _i != 0 and len(node.args) != 0:
+                # no need to update source b/c it just changes from
+                # baseline to target
+                # this is needed b/c second and more permutations
+                # will reset node's value to state before update
+                update_root = node
+
             # reset all settings at source
             if len(node.args) == 0:
                 # later: note: for exact computation of multipel baselines, we
@@ -1819,6 +1846,7 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
                     print('\t' * level + f'turn on {node}->{c}')
                     
                 ec = run(c, level+1, len_bg, new_update_root)
+                update_root = None # b/c already updated
 
                 def print_credit(edge_credit, level):
                     for node1, d in edge_credit.items():
@@ -1828,14 +1856,17 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
                 if verbose:
                     print_credit(ec, level)
 
-                # update edge credit of all upstream nodes of the current node
+                # cp credit from down stream
                 for node1, v in ec.items():
                     for node2, credit in v.items():
                         edge_credit[node1][node2] += credit / nruns
-                                
-                credit = np.vstack([ec[node][c] for c in node.children if c in ec[node]]).sum(0)
-                if node.from_node is not None:
-                    edge_credit[node.from_node][node] += credit/ nruns
+
+                # update its parent's credit
+                if node in ec:
+                    credit = np.vstack([ec[node][c] for c in node.children \
+                                        if c in ec[node]]).sum(0)
+                    if node.from_node is not None:
+                        edge_credit[node.from_node][node] += credit / nruns
                 
         return edge_credit
 
