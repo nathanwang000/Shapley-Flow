@@ -1250,15 +1250,16 @@ class GraphExplainer:
 
 ##### helper functions
 # graph visualization
-def create_xgboost_f(parents, m):
+def create_xgboost_f(parents, m, **kwargs):
     '''
     assume m is a xgboost model
     parents are list of feature names
+    kwargs: keyword args that applies to the predict function
     '''
     def f_(*args):
         bs = len(args[0])
         o = m.predict(xgboost.DMatrix(pd.DataFrame.from_dict(
-            {n: args[i] for i, n in enumerate(parents)})))
+            {n: args[i] for i, n in enumerate(parents)})), **kwargs)
 
         if len(o) != bs: # discrete case
             o = o.reshape(bs, -1)
