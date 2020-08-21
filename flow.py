@@ -300,7 +300,7 @@ class Node:
         self.is_categorical = is_categorical
 
         # arg values that are visible to the node
-        self.visible_arg_values = {} # DEPRECATED for path activation definition
+        self.visible_arg_values = {} # only for distributed edge definition
         self.activated_args = dict((arg, False) for arg in args)
         
         self.args = []
@@ -459,9 +459,8 @@ class CreditFlow:
     
     def dfs(self, node):
         '''
-        deprecated for the new definition
+        method consistent with distributed edge axioms
         '''
-        warnings.warn("DEPRECATED!")        
         if node.is_target_node:
             self.credit(node, node.val - node.last_val)
             return
@@ -638,9 +637,9 @@ class CreditFlow:
     
     def run_bruteforce_sampling(self):
         '''
-        run shap flow algorithm to fairly allocate credit
+        run shap flow algorithm to fairly allocate credit for distributed edge
+        axioms
         '''
-        warnings.warn("DEPRECATED!")        
         sources = get_source_nodes(self.graph)
         # random sample valid timelines
         if self.silent:
@@ -690,21 +689,33 @@ class CreditFlow:
             for node2 in v:
                 v[node2] = v[node2] / self.nruns
 
-    def run(self, method='bruteforce_sampling', len_bg=1):
+    def run(self, method='bruteforce_sampling', len_bg=1, method_type="distributed"):
         '''
         run shapley flow algorithm
         method: different method to run the approach
         len_bg: number of background samples, default to 1
+        method_type: edge, path, or distributed (see my overleaf writeup)
         '''
+        assert method_type in ["path", "distributed"], "currently only support path and distributed in run"
+        
         if method == 'bruteforce_sampling':
             assert self.nruns > 0, f"{method} does not support negative nruns, plz try divide_and_conquer"
-            self.run_bruteforce_sampling_set()
+            if method_type == "path":
+                self.run_bruteforce_sampling_set()
+            elif method_type == "distributed":
+                self.run_bruteforce_sampling()                
         elif method == 'divide_and_conquer':
             assert self.visualize == False, f'{method} does not support visualize'
             if len_bg > 10:
                 warnings.warn(f"len_bg={len_bg} will be slow, please lower len_bg")
-            ec = run_divide_and_conquer_set(self.graph, self.nruns, self.verbose,
-                                            len_bg=len_bg)
+
+            if method_type == "path":
+                ec = run_divide_and_conquer_set(self.graph, self.nruns, self.verbose,
+                                                len_bg=len_bg)
+            elif method_type == "distributed":
+                ec = run_divide_and_conquer(self.graph, self.nruns, self.verbose,
+                                                len_bg=len_bg)
+                
             self.edge_credit = ec
         else:
             assert False, f"unknown method: {method}"
@@ -1124,8 +1135,9 @@ class GraphExplainer:
                         # change the function dependence of the node
                         node.add_arg(noise_node)
                         if bg_sampled.shape != bg_computed.shape:
+                            # categorical variables                            
                             node.is_categorical = True
-                            # categorical variables
+                            
                             # wrapper for scope
                             def wrap_bg_sampler(len_fg):
                                 def f_():
@@ -1877,13 +1889,12 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
 
 def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
     '''
-    divide and conquer implementation of Shapley Flow
-    output an edge credit dictionary
+    divide and conquer implementation of Shapley Flow for distributed
+    edge axioms, output an edge credit dictionary
     
     k: number of samplings, if k<0, we compute the exact ordering
     len_bg: number of baseline settings, usually just len(bg)
     '''
-    warnings.warn("DEPRECATED!")
     def run(node, level, len_bg):
 
         edge_credit = defaultdict(lambda: defaultdict(int))
@@ -1927,7 +1938,12 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
                 c.val = state[c]['val']
                 load_state(c, state)
 
-        for _i, children_order in enumerate(permutations):
+        run_range = range(nruns)
+        if level == 0:
+            run_range = tqdm.tqdm(run_range,
+                                  desc=f"divide_and_conquer at level {level}")
+        for _i in run_range:
+            children_order = next(permutations)
             if verbose:
                 print('\t' * level + f'permutation at {node}:', children_order)
 
