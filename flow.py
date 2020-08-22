@@ -239,6 +239,7 @@ class Graph:
         sampler could be baseline sampler or target sampler
         return {name: val} where val is a numpy array
         '''
+        # todo: need to advance a random state, separate out a sampler object
         d = {}
         for name in sampler:
             d[name] = self.sample(sampler, name)
@@ -1192,7 +1193,7 @@ class GraphExplainer:
                                 def f_():
                                     return fg_diff
                                 return f_
-                            
+
                             # reset node.f
                             node.f = node_f_num(node.f)
                             # add baseline and target sampler for noise_node
@@ -1219,18 +1220,22 @@ class GraphExplainer:
         assert isinstance(X, pd.DataFrame), \
             "assume data frame with column names matching node names"
         assert (self.bg.columns == X.columns).all(), "feature names must match"
-        self.fg = X
+        self.fg = np.array(X)
         names = X.columns
-        bg = np.array(self.bg)
         rc = np.random.choice
+        bg = np.array(self.bg)
+        fg = self.fg
+
+        # todo: baseline sampler need to reset this every time after sample all
+        # create a sampler object to do this
+        bg = bg[rc(len(bg), len(fg))]
         self.graph.baseline_sampler = dict((name,
                                             self._idx_f(i, lambda i: \
-                                                        bg[rc(len(bg),
-                                                              len(X))][:, i]))
+                                                        bg[:, i]))
                                            for i, name in enumerate(names))
         
         self.graph.target_sampler = dict((name, self._idx_f(i, lambda i: \
-                                                            np.array(X)[:, i]))
+                                                            fg[:, i]))
                                          for i, name in enumerate(names))
         self.set_noise_sampler()
         

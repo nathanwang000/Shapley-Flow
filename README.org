@@ -12,6 +12,25 @@
    opened. This requires each node to keep track of its argument's value.
    Difference from version 0 is in dfs part.
 
+** installation instructions
+
+   We require the master version of the package shap placed in the directory to
+   run the notebooks.
+
+   There has been issues installing pygraphviz. First make sure graphviz is
+   installed.  Then make sure you installed python-dev for the specific python
+   version you are using:
+
+   #+BEGIN_SRC bash
+   apt-get install pythonX.X-dev # e.g python3.8-dev; I'm using python3.8
+   #+END_SRC
+
+   Then one should be able to install pygraphviz with
+
+   #+BEGIN_SRC bash
+   pip install pygraphviz # or "pip install --install-option="--include-path=/usr/local/include/" --install-option="--library-path=/usr/local/lib/" pygraphviz" as noted in https://github.com/pygraphviz/pygraphviz/issues/100
+   #+END_SRC
+   
 ** sanity check graphs
 
    The [[./sanity_check_graphs.ipynb][notebook]] contains sanity check graphs for various flow approaches.
@@ -21,3 +40,9 @@
    requires python3.8.2
 
    requirements are listed in requirements.txt
+
+** development notes
+
+   1. schools server: mld3 seems very slow to run xgboost models, but
+      explanation seems to run fine. This is not a huge issue but worth
+      investigating why.
