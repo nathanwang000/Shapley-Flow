@@ -10,7 +10,7 @@ import warnings
 import itertools
 import math
 import copy
-from collections.abc import Iterable
+from collections.abc import Iterable, MutableMapping
 from collections import defaultdict
 import multiprocessing as mp
 from functools import partial
@@ -1097,9 +1097,7 @@ class GraphExplainer:
             '''
             def f_(*args):
                 noise = args[-1] # (n,)
-                computed = f(*args[:-1]) # (n, d)
-                assert (computed[:, -1].sum() > 0.99).all(),\
-                    "need output of softmax"
+                computed = f(*args[:-1]) # (n, d) softmax output
                 computed[:, -1] = 1.01 # avoid numerical issue
                 return (computed.cumsum(1).T > noise).T.argmax(1)
                 
@@ -1128,23 +1126,34 @@ class GraphExplainer:
                     
                     if bg_sampled.shape != bg_computed.shape or \
                        (bg_sampled != bg_computed).any():
-                        # add a noise node
-                        noise_node = Node(node.name + " noise",
-                                          is_noise_node=True)
-                        self.graph.add_node(noise_node)
+
+                        def get_noise_node(node):
+                            '''
+                            return False if no noise node found
+                            otherwise return the noise node
+                            '''
+                            for n in node.args:
+                                if n.is_noise_node:
+                                    assert node.args[-1] == n,\
+                                        "assume noise node is the last arg"
+                                    return n
+                            return False
+
+                        noise_node = get_noise_node(node)
+                        if not noise_node:
+                            # add a noise node
+                            noise_node = Node(node.name + " noise",
+                                              is_noise_node=True)
+                            self.graph.add_node(noise_node)
                         
-                        # change the function dependence of the node
-                        node.add_arg(noise_node)
+                            # change the function dependence of the node
+                            node.add_arg(noise_node)
+                        
                         if bg_sampled.shape != bg_computed.shape:
-                            # categorical variables                            
+                            # categorical variables
                             node.is_categorical = True
                             
                             # wrapper for scope
-                            def wrap_bg_sampler(len_fg):
-                                def f_():
-                                    return np.random.uniform(0, 1, len_fg)
-                                return f_
-
                             def prob_range(cum, s):
                                 '''
                                 cum is (n, d) cumulative sum, 
@@ -1160,7 +1169,7 @@ class GraphExplainer:
                                 lower[zero_loc] = 0
                                 return lower, upper
                             
-                            def wrap_fg_sampler(lower_prob, upper_prob):
+                            def wrap_sampler(lower_prob, upper_prob):
                                 ''' 
                                 lower_prob, upper_prob: output of prob_range
                                 '''
@@ -1171,38 +1180,37 @@ class GraphExplainer:
                             
                             # reset node.f
                             node.f = node_f_cat(node.f)
+                            
                             # add baseline and target sampler for noise_node
+                            low, up = prob_range(bg_computed.cumsum(1),
+                                                 bg_sampled.astype(int))
                             self.graph.baseline_sampler[noise_node.name] = \
-                                wrap_bg_sampler(len(self.fg))
+                                wrap_sampler(low, up)
 
-                            lower, upper = prob_range(fg_computed.cumsum(1),
-                                                      fg_sampled.astype(int))
+                            low, up = prob_range(fg_computed.cumsum(1),
+                                                 fg_sampled.astype(int))
                             self.graph.target_sampler[noise_node.name] = \
-                                wrap_fg_sampler(lower, upper)
+                                wrap_sampler(low, up)
                             
                         else: # numerical variables
 
                             # wrapper for scope
-                            def wrap_bg_sampler(bg_diff, len_fg):
-                                def f_():
-                                    return bg_diff[np.random.choice(len(bg_diff),
-                                                                    len_fg)]
-                                return f_
-
-                            def wrap_fg_sampler(fg_diff):
+                            def wrap_sampler(fg_diff):
                                 def f_():
                                     return fg_diff
                                 return f_
 
                             # reset node.f
                             node.f = node_f_num(node.f)
+                            
                             # add baseline and target sampler for noise_node
                             bg_diff = bg_sampled - bg_computed
-                            fg_diff = fg_sampled - fg_computed
                             self.graph.baseline_sampler[noise_node.name] = \
-                                wrap_bg_sampler(bg_diff, len(self.fg))
+                                wrap_sampler(bg_diff)
+
+                            fg_diff = fg_sampled - fg_computed
                             self.graph.target_sampler[noise_node.name] = \
-                                wrap_fg_sampler(fg_diff)
+                                wrap_sampler(fg_diff)
                 else:
                     node.bg_val = bg_computed
                     node.fg_val = fg_computed
@@ -1219,27 +1227,32 @@ class GraphExplainer:
         '''
         assert isinstance(X, pd.DataFrame), \
             "assume data frame with column names matching node names"
-        assert (self.bg.columns == X.columns).all(), "feature names must match"
+        assert (self.bg.columns == X.columns).all(), \
+            "feature names must match"
         self.fg = np.array(X)
         names = X.columns
         rc = np.random.choice
         bg = np.array(self.bg)
         fg = self.fg
 
-        # todo: baseline sampler need to reset this every time after sample all
-        # create a sampler object to do this
+        # todo: baseline sampler need to reset bg every time after sample all
+        # also need to reset the noise values for bg
         bg = bg[rc(len(bg), len(fg))]
-        self.graph.baseline_sampler = dict((name,
-                                            self._idx_f(i, lambda i: \
-                                                        bg[:, i]))
-                                           for i, name in enumerate(names))
+        self.graph.baseline_sampler.update(
+            dict((name,
+                  self._idx_f(i, lambda i: \
+                              bg[:, i]))
+                 for i, name in enumerate(names)))
         
-        self.graph.target_sampler = dict((name, self._idx_f(i, lambda i: \
-                                                            fg[:, i]))
-                                         for i, name in enumerate(names))
+        self.graph.target_sampler.update(
+            dict((name, self._idx_f(i, lambda i: \
+                                    fg[:, i]))
+                 for i, name in enumerate(names)))
+        
         self.set_noise_sampler()
-        
-    def shap_values(self, X, method='bruteforce_sampling', skip_prepare=False):
+
+    def shap_values(self, X, method='bruteforce_sampling',
+                    skip_prepare=False):
         """ Estimate the SHAP values for a set of samples.
 
         Parameters
@@ -1376,7 +1389,7 @@ def group_nodes(graph, nodes, name, verbose=False):
 
     1. create a new noise node that combines the noise nodes of nodes
     2. create a new node as the concatenation of output_nodes
-    3. reset output nodes' dependency from input_nodes to the concatenation nodes
+    3. reset nodes' dependency from input_nodes to the concatenation nodes
     4. rewire input_nodes' children
     5. check DAG holds after grouping: throw exception if not hold
     '''  

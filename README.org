@@ -37,12 +37,26 @@
 
 ** python version
 
-   requires python3.8.2
+   requires python 3.8.2
 
-   requirements are listed in requirements.txt
-
+   requirements are listed in [[./Pipefile][pipefile]]
+   
 ** development notes
 
    1. schools server: mld3 seems very slow to run xgboost models, but
       explanation seems to run fine. This is not a huge issue but worth
-      investigating why.
+      investigating why
+      
+      The solution is to limit the amount of numpy threads. The following script
+      would do the trick:
+
+      #+BEGIN_SRC python
+      import os # need to happen before loading numpy
+      os.environ["OMP_NUM_THREADS"] = "8" # export OMP_NUM_THREADS=8
+      os.environ["OPENBLAS_NUM_THREADS"] = "8" # export OPENBLAS_NUM_THREADS=8
+      os.environ["MKL_NUM_THREADS"] = "8" # export MKL_NUM_THREADS=8
+      os.environ["VECLIB_MAXIMUM_THREADS"] = "8" # export VECLIB_MAXIMUM_THREADS=8
+      os.environ["NUMEXPR_NUM_THREADS"] = "8" # export NUMEXPR_NUM_THREADS=8
+      #+END_SRC
+
+      
