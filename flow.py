@@ -10,7 +10,7 @@ import warnings
 import itertools
 import math
 import copy
-from collections.abc import Iterable, MutableMapping
+from collections.abc import Iterable
 from collections import defaultdict
 import multiprocessing as mp
 from functools import partial
@@ -239,7 +239,6 @@ class Graph:
         sampler could be baseline sampler or target sampler
         return {name: val} where val is a numpy array
         '''
-        # todo: need to advance a random state, separate out a sampler object
         d = {}
         for name in sampler:
             d[name] = self.sample(sampler, name)
@@ -247,6 +246,7 @@ class Graph:
 
     def reset(self):
 
+        # todo: rerun prepare graph procedures
         assert check_unique_node_names(self), "node names not unique"
         
         baseline_values = self.sample_all(self.baseline_sampler)
@@ -1131,13 +1131,10 @@ class GraphExplainer:
                             '''
                             return False if no noise node found
                             otherwise return the noise node
+                            assume noise node is the last arg
                             '''
-                            for n in node.args:
-                                if n.is_noise_node:
-                                    assert node.args[-1] == n,\
-                                        "assume noise node is the last arg"
-                                    return n
-                            return False
+                            l = node.args[-1]
+                            return l if l.is_noise_node else False
 
                         noise_node = get_noise_node(node)
                         if not noise_node:
@@ -1235,7 +1232,7 @@ class GraphExplainer:
         bg = np.array(self.bg)
         fg = self.fg
 
-        # todo: baseline sampler need to reset bg every time after sample all
+        # todo: baseline sampler need to reset bg every time in graph.reset
         # also need to reset the noise values for bg
         bg = bg[rc(len(bg), len(fg))]
         self.graph.baseline_sampler.update(
@@ -1323,6 +1320,7 @@ def save_graph(G, name, layout="dot"):
     '''
     G is a pygraphviz object;
     save G to a file with name
+    e.g. save_graph(G.to_graphviz(), "tmp.pngt")
     '''
     G.layout(prog=layout)
     G.draw(name)
@@ -1852,8 +1850,8 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
 
             # reset all settings at source
             if len(node.args) == 0:
-                # later: note: for exact computation of multipel baselines, we
-                # need to compute for each baseline instead of sampling
+                # later: note: for exact computation of multiple baselines,
+                # we need to compute for each baseline instead of sampling
                 graph.reset() # reset baselines at source
                 if verbose:
                     print('\t' * level + f'turn on {node} from {node.baseline}->{node.target}')
