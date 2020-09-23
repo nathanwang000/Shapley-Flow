@@ -55,37 +55,31 @@ This note provide a guide for different implementations of Shapley Flow.
   For a balanced tree with n nodes, with a branching factor b
 
   #+begin_example
-  T(n) = (b * b!) T(n/b) + O(b)
-       = k (k T(n/b^2) + O(b)) + O(b)
-       = O(b) + O(bk) + ... + O(b k^(log_b(n)))
+  T(n) = (b * b!) T(n/b) + O(b * b!)
+       = k (k T(n/(b^2)) + O(k)) + O(k)
+       = O(k) + O(k^2) + ... + O(k^(log_b(n)))
   #+end_example
 
   where ~k=b*b!~ comes from the fact that at each level, we are computing the
-  importance for b nodes, trying all $b!$ orderings. O(b) comes from the fact
-  that we are adding the importance of b nodes together to get the importance of
-  the top node. One can make this more efficient by ~k=b*2^(b-1)~ where $b-1$
-  comes from the fact that we are evaluating the added impact of a feature given
-  the different context.
+  importance for b nodes, trying all $b!$ orderings. O(k) comes from the fact
+  that we are adding the importance of $b$ nodes together for $b!$ permutations
+  to get the importance of the top node. One can make this more efficient by
+  ~k=b*2^(b-1)~ where $b-1$ comes from the fact that we are evaluating the added
+  impact of a feature given the different context.
   
-  T(n) is clearly dominated by the last term, solving for it yield
-
-  #+begin_example
-  T(n) = O((b k)^(log_b(n)))
-       = O(2^{(log_2(b) + log_2(k)) * log_2(n) / log_2(b)})
-       = O(2^{log_2(n^{1 + log_2(k)/log_2(b)})})
-       = O(n^(1 + log_b(k)))
-  #+end_example
-  
-  If b is small, T(n) is a small polynomial in n. When b=2, T(n) = O(n^2), which
-  is the time complexity of the partition explainer in ~SHAP~. In general, we
-  have $O(n^b)$ for balanced trees.
+  T(n) is clearly dominated by the last term. Take b=2, $T(n) = O(4^(log_2(n)))
+  = O(n^2)$, which is the time complexity of the partition explainer in
+  ~SHAP~. In general, we have $O(n^b)$ for balanced trees because $k^log_b(n) <
+  b^b^log_b(n) = n^b$. If $b=n$, we have $T(n)=O(2^n)$ for the efficient
+  implementation and $T(n)=O(n*n!)$ for the slightly less efficient
+  implementation.
 
   This is a vast improvement over the $O(2^n)$ complexity of flat Shapley value.
 
 * Time complexity of implementations
 
-  There are several ways to implement Shapley Flow. Assume we have n nodes, each
-  node has $e_i$ number of outgoing edge, and $p$ source to target path. We also
+  There are several ways to implement Shapley Flow. Assume we have $n$ nodes, each
+  node has $e_i$ number of outgoing edges, and $p$ source to target path. We also
   consider the special case of balanced tree with branching factor $b$. For
   sampling approaches, we denote the number of samplers as k. Denote longest
   path length as l (note $l \leq n$).
@@ -97,8 +91,15 @@ This note provide a guide for different implementations of Shapley Flow.
   of orderings to compute. For each ordering, we need to traverse all possible
   paths in the specified order.
 
-  - Time complexity in general: $O(\Pi_{i=1}^n e_i) p$
-  - Time complexity for balanced tree: $O(b^n n)$
+  - Time complexity in general: $O(\Pi_{i=1}^n e_i! p)$
+    
+    The factorial terms comes from trying all possible permutations of edges;
+    $p$, the number of path, comes from the notion that for a given dfs ordering,
+    I'm computing $p$ function differences.
+    
+  - Time complexity for balanced tree: $O((b!)^n n)$
+
+    The n comes from T(n) = O(b) + b * T(n/b) = O(n)
 
 ** divide and conquer: exact solution
 
@@ -107,8 +108,15 @@ This note provide a guide for different implementations of Shapley Flow.
    method assumes that path ordering for the impact of edges that share the same
    stem does not matter.
 
-   - Time complexity for general case: $O(n!)$
+   - Time complexity for general case: $Omega(p)$ and $O((n!n)^n)$
+     
+     I just know that its complexity must be higher than a particular dfs run.
+     The upper bound comes from T(n) <= k + k T(n-1), where k=max(e_i)! max(e_i)
+     for similar reason as shown before. T(n-1) because the graph is acyclic.
+
    - Time complexity for balanced tree: $O(n^b)$
+
+     as shown before
 
 ** sampling of path: approximation
 
@@ -135,8 +143,6 @@ This note provide a guide for different implementations of Shapley Flow.
 
    This approach can be impelemented on top of the divide and conquer solution
    by sampling permutations of outgoing edges at each node.
-
-   - Time complexity for balanced tree: $O(n^(1 + log_b(k)))$
    
 ** cache
 
