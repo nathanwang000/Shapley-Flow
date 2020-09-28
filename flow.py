@@ -1320,7 +1320,7 @@ def save_graph(G, name, layout="dot"):
     '''
     G is a pygraphviz object;
     save G to a file with name
-    e.g. save_graph(G.to_graphviz(), "tmp.pngt")
+    e.g. save_graph(G.to_graphviz(), "tmp.png")
     '''
     G.layout(prog=layout)
     G.draw(name)
@@ -2003,10 +2003,13 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
                 for node1, v in ec.items():
                     for node2, credit in v.items():
                         edge_credit[node1][node2] += credit / nruns
-                                
-                credit = np.vstack([ec[node][c] for c in node.children if c in ec[node]]).sum(0)
+
                 if node.from_node is not None:
-                    edge_credit[node.from_node][node] += credit/ nruns
+                    edge_credit[node.from_node][node] += ec[node][c] / nruns
+                        
+                # credit = np.vstack([ec[node][c] for c in node.children if c in ec[node]]).sum(0)
+                # if node.from_node is not None:
+                #     edge_credit[node.from_node][node] += credit/ nruns
                 
         return edge_credit
 
