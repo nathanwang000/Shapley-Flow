@@ -191,11 +191,11 @@ class Graph:
 
             node.f = create_xgboost_f([a.name for a in node.args], m)
                 
-    def to_graphviz(self):
+    def to_graphviz(self, rankdir="BT"):
         '''
         convert to graphviz format
         '''
-        G = AGraph(directed=True)
+        G = AGraph(directed=True, rankdir=rankdir)
         for node1 in topo_sort(self.nodes):
             for node2 in node1.args:
 
@@ -331,7 +331,7 @@ class CreditFlow:
     ''' the main algorithm to get a flow of information '''
     def __init__(self, graph, verbose=False, nruns=10,
                  visualize=False, fold_noise=True,
-                 silent=False):
+                 silent=False, rankdir="TB"):
         ''' 
         graph: causal graph to explain
         verbose: whether to print out decision process        
@@ -356,6 +356,7 @@ class CreditFlow:
         self.penwidth_stress = 5
         self.penwidth_normal = 1
         self.fold_noise = fold_noise
+        self.rankdir = rankdir # for graph visualization could be LR
         self.silent = silent
         if silent:
             self.verbose = False
@@ -370,18 +371,16 @@ class CreditFlow:
         '''
         if edge_credit is None:
             edge_credit= self.edge_credit
-        viz_graph(self.credit2dot(edge_credit,
-                                  format_str=format_str,
-                                  idx=idx,
-                                  max_display=max_display))
+        dot = self.credit2dot(edge_credit,
+                              format_str=format_str,
+                              idx=idx,
+                              max_display=max_display)
+        viz_graph(dot)
+        return dot
 
-    def draw_asv(self, idx=-1, max_display=None, format_str="{:.2f}"):
-        '''
-        asv view only shows impact of source features
-        assumes using ipython notebook
-        idx: the index of target to visualize, if negative assumes sum,
-             if an iterable, assumes sum over the list of values
-        '''
+    def get_asv_edge_credit(self, idx=-1):
+        # duplicated code with draw_asv, refactor later
+        flow_credit = self.edge_credit
         edge_credit = defaultdict(lambda: defaultdict(int))
         target_node = [node for node in self.graph if node.is_target_node][0]
         
@@ -395,7 +394,45 @@ class CreditFlow:
             new_idx = idx
 
         # fold non source node        
-        for node1, d in self.edge_credit.items():
+        for node1, d in flow_credit.items():
+            for node2, val in d.items():
+                if len(node1.args) > 0: continue
+
+                # set aggregate or individual mode
+                if isinstance(idx, Iterable):
+                    edge_credit[node1][target_node] += np.mean(np.abs(val[idx]))
+                else:
+                    if idx < 0:
+                        edge_credit[node1][target_node] += np.mean(np.abs(val))
+                    else:
+                        edge_credit[node1][target_node] += val[idx]
+        return edge_credit
+    
+    def draw_asv(self, idx=-1, max_display=None, format_str="{:.2f}",
+                 flow_credit=None):
+        '''
+        asv view only shows impact of source features
+        assumes using ipython notebook
+        idx: the index of target to visualize, if negative assumes sum,
+             if an iterable, assumes sum over the list of values
+        '''
+        if flow_credit is None:
+            flow_credit = self.edge_credit
+
+        edge_credit = defaultdict(lambda: defaultdict(int))
+        target_node = [node for node in self.graph if node.is_target_node][0]
+        
+        if isinstance(idx, Iterable):
+            if len(idx) == 1:
+                idx = idx[0]
+                new_idx = idx
+            else:
+                new_idx = -1 # set downstream task to aggregate
+        else:
+            new_idx = idx
+
+        # fold non source node        
+        for node1, d in flow_credit.items():
             for node2, val in d.items():
                 if len(node1.args) > 0: continue
 
@@ -411,12 +448,14 @@ class CreditFlow:
         G = self.credit2dot_pygraphviz(edge_credit, format_str,
                                        new_idx, max_display)
         viz_graph(G)
+        return G
         
     def viz_graph_init(self, graph):
         '''
         initialize self.dot with the graph structure
         '''
-        dot = AGraph(directed=True)
+        self.rankdir = self.rankdir if hasattr(self, "rankdir") else "TB"
+        dot = AGraph(directed=True, rankdir=self.rankdir)
         for node in topo_sort(graph):
             if node not in dot:
                 dot.add_node(node,
@@ -735,12 +774,17 @@ class CreditFlow:
 
         idx: the index of target to visualize, if negative assumes sum
         '''
-        G = AGraph(directed=True)
+        self.rankdir = self.rankdir if hasattr(self, "rankdir") else "TB"
+        G = AGraph(directed=True, rankdir=self.rankdir)
 
         edge_values = []
         max_v = 1e-6 # avoid division by zero error
         for node1, d in edge_credit.items():
             for node2, val in d.items():
+
+                if self.fold_noise and node1.is_noise_node:
+                    continue # only visualize non noise node
+                
                 max_v = max(abs(val), max_v)
                 edge_values.append(abs(val))
 
@@ -749,13 +793,15 @@ class CreditFlow:
             min_v = 0
         else:
             min_v = edge_values[-max_display]
-        
+            
         for node1, d in edge_credit.items():
             for node2, val in d.items():
                 
                 v = val
                 edge_label = format_str.format(v)
                 if abs(v) < min_v: continue
+                if self.fold_noise and node1.is_noise_node:
+                    continue # only visualize non noise node
 
                 red = "#ff0051"
                 blue = "#008bfb"
@@ -780,7 +826,9 @@ class CreditFlow:
                             G.add_node(node, shape="point")
                         else:
                             shape = 'box' if node.is_categorical else 'ellipse'
-                            if idx < 0 or not isinstance(node.target, np.ndarray):
+                            if idx < 0 or \
+                               not isinstance(node.target, np.ndarray) or \
+                               node.is_noise_node:
                                 G.add_node(node, label=node.name, shape=shape)
                             else:
                                 txt = self.graph.display_translator\
@@ -1051,7 +1099,9 @@ class GraphExplainer:
         
         self.graph = copy.deepcopy(graph)
         self.nruns = nruns
-        self.bg = X        
+
+        self.bg = X[:1] # todo: currently only support one baseline
+        # self.bg = X
         
     def _idx_f(self, idx, f):
         '''helper to save context'''
