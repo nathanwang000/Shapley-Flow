@@ -7,6 +7,7 @@ if './shap' not in sys.path:
 import shap
 import numpy as np
 import copy
+import tqdm
 
 class FeatureAttribution:
     '''
@@ -16,24 +17,27 @@ class FeatureAttribution:
     def __init__(self, values, input_names):
         self.values = values
         self.input_names = input_names
-        self.data = np.arange(len(input_names))        
+        self.data = None # np.arange(len(input_names))        
 
-    def draw(self, sample_ind):
+    def draw(self, sample_ind, max_display=None, show=True):
         class D(): pass
         b = D()
         b.input_names = self.input_names
         b.values = self.values[sample_ind]
         b.data = self.data
         b.transform_history = []
-        shap.plots.bar(b)
+        shap.plots.bar(b, max_display=max_display, show=show)
 
 class OnManifoldExplainer:
 
-    def __init__(self, f, X, nruns=100, sigma_sq=0.1):
+    def __init__(self, f, X, nruns=100, sigma_sq=0.1, orderings=None):
         '''
         f: the model to explain, when called evaluate the model
         X: background value samples from X, assumes dataframe
         nruns: how many runs for each data point
+        orderings: specifies what possible orderings to try; assumes
+                   it is a list of list (inner list contains permutation
+                   of indices); this is useful for ASV
         '''
         self.nruns = nruns
         self.bg = np.array(X[:1]) # todo: currently only support one baseline
@@ -41,6 +45,7 @@ class OnManifoldExplainer:
         self.feature_names =  list(X.columns)
         self.f = f
         self.sigma_sq = sigma_sq
+        self.orderings = orderings
 
     def payoff(self, C, x):
         '''
@@ -98,10 +103,15 @@ class OnManifoldExplainer:
         self.fg = np.array(X)
         self.values = np.zeros((n_fg, d))
 
-        for sample, x in enumerate(np.array(X)):
+        for sample in tqdm.trange(len(X)):
+            x = np.array(X)[sample]
             for i in range(self.nruns):
                 # sample an random ordering of features
-                order = np.random.permutation(d)
+                if self.orderings is None:
+                    order = np.random.permutation(d)
+                else:
+                    order = self.orderings[np.random.choice(len(self.orderings))]
+                    assert (np.array(sorted(order)) == np.arange(d)).all()
                 # follow the ordering to calculate payoff function difference
                 C = []
                 v_last = payoff(C, x)
@@ -116,7 +126,7 @@ class OnManifoldExplainer:
         
 class IndExplainer:
 
-    def __init__(self, f, X, nruns=100, sigma_sq=0.1):
+    def __init__(self, f, X, nruns=100):
         '''
         f: the model to explain, when called evaluate the model
         X: background value samples from X, assumes dataframe
@@ -127,7 +137,6 @@ class IndExplainer:
         self.bg_dist = np.array(X)
         self.feature_names =  list(X.columns)
         self.f = f
-        self.sigma_sq = sigma_sq
 
     def payoff(self, C):
         '''

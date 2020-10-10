@@ -246,7 +246,6 @@ class Graph:
 
     def reset(self):
 
-        # todo: rerun prepare graph procedures
         assert check_unique_node_names(self), "node names not unique"
         
         baseline_values = self.sample_all(self.baseline_sampler)
@@ -1100,7 +1099,11 @@ class GraphExplainer:
         self.graph = copy.deepcopy(graph)
         self.nruns = nruns
 
-        self.bg = X[:1] # todo: currently only support one baseline
+        '''todo: currently only support one baseline        
+        simple idea for multiple baseline: run single baseline nruns times
+        and then use linearity to combine the resulting edge credit
+        '''
+        self.bg = X[:1] 
         # self.bg = X
         
     def _idx_f(self, idx, f):
@@ -1282,9 +1285,7 @@ class GraphExplainer:
         bg = np.array(self.bg)
         fg = self.fg
 
-        # todo: baseline sampler need to reset bg every time in graph.reset
-        # also need to reset the noise values for bg
-        bg = bg[rc(len(bg), len(fg))]
+        bg = bg[rc(len(bg), len(fg))] # share the same baseline across foreground
         self.graph.baseline_sampler.update(
             dict((name,
                   self._idx_f(i, lambda i: \
