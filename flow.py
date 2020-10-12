@@ -23,6 +23,7 @@ import tqdm
 import joblib
 import dill
 from sklearn.model_selection import train_test_split
+from sklearn.linear_model import LinearRegression
 
 def multiprocessing_setup():
     '''
@@ -146,12 +147,14 @@ class Graph:
         assert check_child_args_consistency(self), "child parent not consistent"
         assert check_DAG(self), "not a dag anymore"
 
-    def fit_missing_links(self, X):
+    def fit_missing_links(self, X, method='xgboost'):
         '''
         X is assumed to be a dataframe
 
         the columns of X should contain features of nodes that haven't been fit
         this function fit those links with an xgboost model
+
+        method: linear or xgboost
         '''
 
         nodes_to_learn = [n for n in self.nodes \
@@ -164,32 +167,37 @@ class Graph:
             X_train, X_test, y_train, y_test = train_test_split(
                 X[[p.name for p in node.args]],
                 np.array(X[node.name]), test_size=0.2, random_state=42)
-            xgb_train = xgboost.DMatrix(X_train, label=y_train)
-            xgb_test = xgboost.DMatrix(X_test, label=y_test)
 
-            if node.is_categorical:
-                num_class = len(np.unique(X[name]))
-                params = {
-                    "eta": 0.002,
-                    "max_depth": 3,
-                    'objective': 'multi:softprob',
-                    'eval_metric': 'mlogloss',
-                    'num_class': num_class,
-                    "subsample": 0.5
-                }
+            if method == 'xgboost':
+                xgb_train = xgboost.DMatrix(X_train, label=y_train)
+                xgb_test = xgboost.DMatrix(X_test, label=y_test)
+
+                if node.is_categorical:
+                    num_class = len(np.unique(X[name]))
+                    params = {
+                        "eta": 0.002,
+                        "max_depth": 3,
+                        'objective': 'multi:softprob',
+                        'eval_metric': 'mlogloss',
+                        'num_class': num_class,
+                        "subsample": 0.5
+                    }
+                else:
+                    params = {
+                        "eta": 0.002,
+                        "max_depth": 3,
+                        'objective': 'reg:squarederror',
+                        'eval_metric': 'rmse',
+                        "subsample": 0.5
+                    }
+                m = xgboost.train(params, xgb_train, 500,
+                                  evals = [(xgb_test, "test")],
+                                  verbose_eval=100) # False)
+
+                node.f = create_xgboost_f([a.name for a in node.args], m)
             else:
-                params = {
-                    "eta": 0.002,
-                    "max_depth": 3,
-                    'objective': 'reg:squarederror',
-                    'eval_metric': 'rmse',
-                    "subsample": 0.5
-                }
-            m = xgboost.train(params, xgb_train, 500,
-                              evals = [(xgb_test, "test")],
-                              verbose_eval=100) # False)
-
-            node.f = create_xgboost_f([a.name for a in node.args], m)
+                m = LinearRegression().fit(X_train, y_train)
+                node.f = create_linear_f([a.name for a in node.args], m.predict)
                 
     def to_graphviz(self, rankdir="BT"):
         '''
@@ -362,7 +370,7 @@ class CreditFlow:
             self.visualize = False
 
     def draw(self, idx=-1, max_display=None, format_str="{:.2f}",
-             edge_credit=None):
+             edge_credit=None, show_fg_val=True):
         '''
         assumes using ipython notebook
         idx: the index of target to visualize, if negative assumes sum,
@@ -373,12 +381,14 @@ class CreditFlow:
         dot = self.credit2dot(edge_credit,
                               format_str=format_str,
                               idx=idx,
-                              max_display=max_display)
+                              max_display=max_display,
+                              show_fg_val=show_fg_val)
         viz_graph(dot)
         return dot
 
-    def get_asv_edge_credit(self, idx=-1):
+    def get_asv_edge_credit(self, idx=-1, aggregate=True):
         # duplicated code with draw_asv, refactor later
+        # aggregate whether show 1 number for asv credit
         flow_credit = self.edge_credit
         edge_credit = defaultdict(lambda: defaultdict(int))
         target_node = [node for node in self.graph if node.is_target_node][0]
@@ -399,10 +409,16 @@ class CreditFlow:
 
                 # set aggregate or individual mode
                 if isinstance(idx, Iterable):
-                    edge_credit[node1][target_node] += np.mean(np.abs(val[idx]))
+                    if aggregate:
+                        edge_credit[node1][target_node] += np.mean(np.abs(val[idx]))
+                    else:
+                        edge_credit[node1][target_node] += val[idx]
                 else:
                     if idx < 0:
-                        edge_credit[node1][target_node] += np.mean(np.abs(val))
+                        if aggregate:
+                            edge_credit[node1][target_node] += np.mean(np.abs(val))
+                        else:
+                            edge_credit[node1][target_node] += val
                     else:
                         edge_credit[node1][target_node] += val[idx]
         return edge_credit
@@ -767,7 +783,7 @@ class CreditFlow:
 
 
     def credit2dot_pygraphviz(self, edge_credit, format_str, idx=-1,
-                              max_display=None):
+                              max_display=None, show_fg_val=True):
         '''
         pygraphviz version of credit2dot
 
@@ -830,15 +846,18 @@ class CreditFlow:
                                node.is_noise_node:
                                 G.add_node(node, label=node.name, shape=shape)
                             else:
-                                txt = self.graph.display_translator\
-                                    [node.name](node.target[idx])
-                                if isinstance(txt, str):
-                                    fmt = "{}: {}"
+                                if show_fg_val:
+                                    txt = self.graph.display_translator\
+                                        [node.name](node.target[idx])
+                                    if isinstance(txt, str):
+                                        fmt = "{}: {}"
+                                    else:
+                                        fmt = "{}: " + format_str
+                                    G.add_node(node, label=\
+                                               fmt.format(node, txt),
+                                               shape=shape)
                                 else:
-                                    fmt = "{}: " + format_str
-                                G.add_node(node, label=\
-                                           fmt.format(node, txt),
-                                           shape=shape)
+                                    G.add_node(node, label=node.name, shape=shape)
 
                 G.add_edge(node1, node2)
                 e = G.get_edge(node1, node2)                
@@ -858,7 +877,8 @@ class CreditFlow:
         return G
         
     def credit2dot(self, raw_edge_credit,
-                   format_str="{:.2f}", idx=-1, max_display=None):
+                   format_str="{:.2f}", idx=-1,
+                   max_display=None, show_fg_val=True):
         '''
         convert the graph to pydot graph for visualization
         e.g.:
@@ -900,7 +920,8 @@ class CreditFlow:
                         edge_credit[node1][node2] += val[idx]
 
         return self.credit2dot_pygraphviz(edge_credit, format_str,
-                                          new_idx, max_display)
+                                          new_idx, max_display,
+                                          show_fg_val)
 
 class ParallelCreditFlow:
     '''
@@ -1300,7 +1321,7 @@ class GraphExplainer:
         self.set_noise_sampler()
 
     def shap_values(self, X, method='bruteforce_sampling',
-                    skip_prepare=False):
+                    skip_prepare=False, rankdir='TB'):
         """ Estimate the SHAP values for a set of samples.
 
         Parameters
@@ -1322,12 +1343,23 @@ class GraphExplainer:
                 warnings.warn("maybe you want to skip prepare")
                 raise e
             
-        cf = CreditFlow(self.graph, nruns=self.nruns)
+        cf = CreditFlow(self.graph, nruns=self.nruns, rankdir=rankdir)
         cf.run(method, len_bg=len(self.bg))
         return cf
 
 ##### helper functions
 # graph visualization
+def create_linear_f(parents, m, **kwargs):
+    '''
+    assume m is a linear regression model from sklearn predict / predict_proba
+    parents are list of feature names
+    kwargs: keyword args that applies to the predict function
+    '''
+    def f_(*args):
+        return m(np.vstack(args).T)
+
+    return f_
+
 def create_xgboost_f(parents, m, **kwargs):
     '''
     assume m is a xgboost model
@@ -2075,7 +2107,8 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
 # helper for building graphs
 # sample graph
 def build_feature_graph(X, causal_links, categorical_feature_names=[],
-                        display_translator={}, target_name='prediction'):
+                        display_translator={}, target_name='prediction',
+                        method="xgboost"):
     '''
     build and return a graph (list of nodes), to be runnable in main
     
@@ -2085,6 +2118,7 @@ def build_feature_graph(X, causal_links, categorical_feature_names=[],
     display_translator: translate features values to readable format, see 
                         flow.py:translator
     target_name: name of the target prediction
+    method: currently support xgboost or linear
     '''
     names = X.columns
     nodes = [Node(name, is_categorical=(name in categorical_feature_names))\
@@ -2093,7 +2127,7 @@ def build_feature_graph(X, causal_links, categorical_feature_names=[],
     
     graph = Graph(nodes, display_translator=display_translator)
     graph.add_links(causal_links)
-    graph.fit_missing_links(X)
+    graph.fit_missing_links(X, method=method)
     return graph
 
 def sample_build_graph():

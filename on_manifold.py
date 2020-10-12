@@ -2,12 +2,13 @@
 perform on manifold perturbation
 '''
 import sys
-if './shap' not in sys.path:
-    sys.path = ['./shap'] + sys.path
+sys.path = ['/home/jiaxuan/msr_intern_2020/shap'] + sys.path # todo: change hard code
 import shap
 import numpy as np
 import copy
 import tqdm
+import itertools
+import math
 
 class FeatureAttribution:
     '''
@@ -102,13 +103,19 @@ class OnManifoldExplainer:
         n_fg, d = X.shape
         self.fg = np.array(X)
         self.values = np.zeros((n_fg, d))
-
+        # this assumes a single baseline
+        nruns = self.nruns if self.nruns <= math.factorial(d) else math.factorial(d)
+        
         for sample in tqdm.trange(len(X)):
+            permutations = itertools.permutations(list(range(d)))
             x = np.array(X)[sample]
-            for i in range(self.nruns):
+            for i in range(nruns):
                 # sample an random ordering of features
                 if self.orderings is None:
-                    order = np.random.permutation(d)
+                    if self.nruns <= math.factorial(d):
+                        order = np.random.permutation(d)
+                    else:
+                        order = next(permutations)
                 else:
                     order = self.orderings[np.random.choice(len(self.orderings))]
                     assert (np.array(sorted(order)) == np.arange(d)).all()
@@ -121,7 +128,7 @@ class OnManifoldExplainer:
                     self.values[sample, i] += v - v_last
                     v_last = v
 
-        self.values /= self.nruns
+        self.values /= nruns
         return FeatureAttribution(self.values, self.feature_names)
         
 class IndExplainer:
@@ -165,7 +172,7 @@ class IndExplainer:
         self.fg = np.array(X)
         self.values = np.zeros((n_fg, d))
 
-        for i in range(self.nruns):
+        for i in tqdm.trange(self.nruns):
             # sample an random ordering of features
             order = np.random.permutation(d)
             # follow the ordering to calculate payoff function difference
