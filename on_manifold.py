@@ -9,6 +9,7 @@ import copy
 import tqdm
 import itertools
 import math
+from scipy.spatial import distance
 
 class FeatureAttribution:
     '''
@@ -31,7 +32,8 @@ class FeatureAttribution:
 
 class OnManifoldExplainer:
 
-    def __init__(self, f, X, nruns=100, sigma_sq=0.1, orderings=None):
+    def __init__(self, f, X, nruns=100, sigma_sq=0.1, orderings=None,
+                 single_bg=True):
         '''
         f: the model to explain, when called evaluate the model
         X: background value samples from X, assumes dataframe
@@ -47,6 +49,7 @@ class OnManifoldExplainer:
         self.f = f
         self.sigma_sq = sigma_sq
         self.orderings = orderings
+        self.single_bg = single_bg
 
     def payoff(self, C, x):
         '''
@@ -56,21 +59,63 @@ class OnManifoldExplainer:
         # this is only needed because I have single baseline
         # remove when I account for more
         if len(C) == 0:
-            return self.f(self.bg)
+            if self.single_bg:
+                return self.f(self.bg)
+            else:
+                return self.f(self.bg_dist).mean()
 
         bg_c = self.bg_dist[:, [i for i in C]]
-        S_c = np.cov(bg_c.T)  # each row of cov function need to be an observation
+        S_c = np.cov(bg_c.T)  # each row of cov function need to be a variable
 
         x_c = x[[i for i in C]]
 
-        # calculate mahalanobis distance
+        # # calculate mahalanobis distance
         diff = (x_c.reshape(1, -1) - bg_c) # (n_bg, d)
-        inv = np.linalg.inv(S_c + 1e-10 * np.random.uniform(0,1,S_c.shape))\
-            if len(C) > 1 else 1 / (S_c + 1e-10)
+        inv = np.linalg.inv(S_c + 1e-8 * np.random.uniform(0,1,S_c.shape))\
+            if len(C) > 1 else 1 / (S_c + 1e-8)
         dist_sq = (diff.dot(inv) * diff).sum(1) / len(C)
 
+        # another implementation of the previous 3 lines: todo: deal with numerical issue after submission!
+        # def cov(X): # save as np.cov
+        #     Ex = X - X.mean(0).reshape(1, -1)
+        #     return Ex.T @ Ex / (Ex.shape[0] - 1)
+            
+        # diff = (x_c.reshape(1, -1) - bg_c) # (n_bg, d)
+        # if len(C) == 1:
+        #     inv = 1/(S_c + 1e-10)
+        #     dist_sq = diff * inv * diff
+        # else:
+        #     inv = np.linalg.inv(S_c + 1e-10 * np.random.uniform(0,1,S_c.shape))\
+        #         if len(C) > 1 else 1 / (S_c + 1e-10)
+        #     gt = []
+        #     for i in range(len(bg_c)):
+        #         gt.append(distance.mahalanobis(x_c, bg_c[i], inv))
+        #     gt = np.array(gt)**2 / len(C)
+        #     dist_sq = gt
+            
+        #     # Ex = bg_c - bg_c.mean(0).reshape(1, -1)
+        #     # u, s, vh = np.linalg.svd(Ex) # u: (n, n), vh: (d, d)
+        #     # # # fill s
+        #     # # m = np.zeros(max(len(u), len(vh)))
+        #     # # m[:len(s)] = s
+        #     # # s = np.diag(m)
+        #     # # s = s[:len(u), :len(vh)]
+            
+        #     # # inv(S_c) = vh.T (n-1) / diag(s**2) vh
+        #     # a = (diff @ vh.T)[:, :len(s)]
+        #     # s = (bg_c.shape[0]-1) / (s**2+1e-10)
+        #     # dist_sq = a * s
+        #     # dist_sq = (dist_sq * a).sum(1) / len(C)
+        #     # print(dist_sq)
+        
         # calculate the kernel weights
-        w = np.exp(- dist_sq / 2 / self.sigma_sq) # (n_bg,)
+        exponent = dist_sq / 2 / self.sigma_sq
+        # exponent -= exponent.max() # avoid numerical error
+        w = np.exp(-exponent) # (n_bg,)
+
+        # if len(C) > 1:
+        #     _, s, _ = np.linalg.svd(inv)
+        #     print(dist_sq, w, s)
 
         # get the weighted output
         current_x = copy.deepcopy(self.bg_dist)
