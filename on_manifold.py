@@ -21,11 +21,12 @@ class FeatureAttribution:
         self.input_names = input_names
         self.data = None # np.arange(len(input_names))        
 
-    def draw(self, sample_ind, max_display=None, show=True):
+    def draw(self, sample_ind=-1, max_display=None, show=True, values=None):
+        if values is None: values = self.values
         class D(): pass
         b = D()
         b.input_names = self.input_names
-        b.values = self.values[sample_ind]
+        b.values = values[sample_ind]
         b.data = self.data
         b.transform_history = []
         shap.plots.bar(b, max_display=max_display, show=show)
