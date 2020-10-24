@@ -52,6 +52,78 @@ class OnManifoldExplainer:
         self.orderings = orderings
         self.single_bg = single_bg
 
+    def mahalanobis_dist_sq(self, v1, v2, c):
+        '''
+        output: v[i]^T @ inv(C) @ v[i] for each i
+        v1: foreground sample (1, d)
+        v2: background samples (n, d)
+        c: covariance matrix (d, d)
+        '''
+        v = v1 - v2 # (n, d)
+        d = v.shape[1]
+        inv = np.linalg.inv(c + 1e-8 * np.random.uniform(0,1,c.shape))\
+            if d > 1 else 1 / (c + 1e-8)
+        dist_sq = (v.dot(inv) * v).sum(1) / d
+        return dist_sq
+
+    def mahalanobis_dist_sq2(self, v1, v2, c):
+        '''
+        output: v[i]^T @ inv(C) @ v[i] for each i
+        v1: foreground sample (1, d)
+        v2: background samples (n, d)
+        c: covariance matrix (d, d)
+        '''
+        d = v1.shape[1]        
+        inv = np.linalg.inv(c + 1e-10 * np.random.uniform(0,1,c.shape))\
+            if d > 1 else 1 / (c + 1e-10)
+        dist_sq = []
+        for i in range(len(v2)):
+            dist_sq.append(distance.mahalanobis(v1[0], v2[i], inv))
+        dist_sq = np.array(dist_sq)**2 / d
+        return dist_sq
+
+    def mahalanobis_dist_sq3(self, v1, v2, c):
+        '''
+        output: v[i]^T @ inv(C) @ v[i] for each i
+        v1: foreground sample (1, d)
+        v2: background samples (n, d)
+        c: covariance matrix (d, d)
+        '''
+        def cov(X): # save as np.cov
+            Ex = X - X.mean(0).reshape(1, -1)
+            return Ex.T @ Ex / (Ex.shape[0] - 1)
+            
+        v = v1 - v2
+        n, d = v2.shape
+
+        assert n > d, "need n > d to have invertible matrix"
+        
+        if d == 1:
+            inv = 1/(c + 1e-10)
+            dist_sq = (v * inv * v).ravel()
+        else:
+            Ex = v2 - v2.mean(0).reshape(1, -1)
+            u, s, vh = np.linalg.svd(Ex) # u: (n, n), vh: (d, d)
+            
+            # fill s
+            m = np.zeros((n, d))
+            m[:len(s), :len(s)] = np.diag(s)
+            s = m # (n, d)
+            # assert np.allclose(Ex, np.dot(u, np.dot(s, vh))), "must match"
+
+            S = s.T @ s # (d, d) 
+            inv_S = ((n-1) / (np.diag(S) + 1e-10)).reshape(1, d) # (1, d)
+
+            # print((vh.T * inv_S).dot(vh))
+            # print(Ex.T @ EX / )
+
+            # inv(c) = vh.T (n-1) / diag(s**2) vh
+            a = v @ vh.T # (n, d)
+            dist_sq = a * inv_S # (n, d)
+            dist_sq = (dist_sq * a).sum(1) / d # (n,)
+            
+        return dist_sq
+    
     def payoff(self, C, x):
         '''
         C is the coalition; on manifold version
@@ -71,52 +143,14 @@ class OnManifoldExplainer:
         x_c = x[[i for i in C]]
 
         # # calculate mahalanobis distance
-        diff = (x_c.reshape(1, -1) - bg_c) # (n_bg, d)
-        inv = np.linalg.inv(S_c + 1e-8 * np.random.uniform(0,1,S_c.shape))\
-            if len(C) > 1 else 1 / (S_c + 1e-8)
-        dist_sq = (diff.dot(inv) * diff).sum(1) / len(C)
-
-        # another implementation of the previous 3 lines: todo: deal with numerical issue after submission!
-        # def cov(X): # save as np.cov
-        #     Ex = X - X.mean(0).reshape(1, -1)
-        #     return Ex.T @ Ex / (Ex.shape[0] - 1)
-            
-        # diff = (x_c.reshape(1, -1) - bg_c) # (n_bg, d)
-        # if len(C) == 1:
-        #     inv = 1/(S_c + 1e-10)
-        #     dist_sq = diff * inv * diff
-        # else:
-        #     inv = np.linalg.inv(S_c + 1e-10 * np.random.uniform(0,1,S_c.shape))\
-        #         if len(C) > 1 else 1 / (S_c + 1e-10)
-        #     gt = []
-        #     for i in range(len(bg_c)):
-        #         gt.append(distance.mahalanobis(x_c, bg_c[i], inv))
-        #     gt = np.array(gt)**2 / len(C)
-        #     dist_sq = gt
-            
-        #     # Ex = bg_c - bg_c.mean(0).reshape(1, -1)
-        #     # u, s, vh = np.linalg.svd(Ex) # u: (n, n), vh: (d, d)
-        #     # # # fill s
-        #     # # m = np.zeros(max(len(u), len(vh)))
-        #     # # m[:len(s)] = s
-        #     # # s = np.diag(m)
-        #     # # s = s[:len(u), :len(vh)]
-            
-        #     # # inv(S_c) = vh.T (n-1) / diag(s**2) vh
-        #     # a = (diff @ vh.T)[:, :len(s)]
-        #     # s = (bg_c.shape[0]-1) / (s**2+1e-10)
-        #     # dist_sq = a * s
-        #     # dist_sq = (dist_sq * a).sum(1) / len(C)
-        #     # print(dist_sq)
+        v1 = x_c.reshape(1, -1) # (1, d)
+        v2 = bg_c # (n, d)
+        dist_sq = self.mahalanobis_dist_sq3(v1, v2, S_c) # could choose 1 2 or 3
         
         # calculate the kernel weights
         exponent = dist_sq / 2 / self.sigma_sq
         # exponent -= exponent.max() # avoid numerical error
         w = np.exp(-exponent) # (n_bg,)
-
-        # if len(C) > 1:
-        #     _, s, _ = np.linalg.svd(inv)
-        #     print(dist_sq, w, s)
 
         # get the weighted output
         current_x = copy.deepcopy(self.bg_dist)
