@@ -1108,24 +1108,24 @@ class ParallelCreditFlow:
 
 class GraphExplainer:
 
-    def __init__(self, graph, X, nruns=100):
+    def __init__(self, graph, bg, nruns=100):
         '''
         graph: graph to explain
-        X: background value samples from X, assumes dataframe
+        bg: background values, assumes dataframe
         nruns: how many runs for each data point
         '''
-        assert isinstance(X, pd.DataFrame), \
+        assert isinstance(bg, pd.DataFrame), \
             "assume data frame with column names matching node names"
         
         self.graph = copy.deepcopy(graph)
         self.nruns = nruns
 
-        '''todo: currently only support one baseline        
-        simple idea for multiple baseline: run single baseline nruns times
+        '''only support one baseline, for multiple baseline 
+        see ipython notebook for multiple baseline:
+        run single baseline nruns times
         and then use linearity to combine the resulting edge credit
         '''
-        self.bg = X[:1] 
-        # self.bg = X
+        self.bg = bg[:1] # (1, d)
         
     def _idx_f(self, idx, f):
         '''helper to save context'''
@@ -1302,11 +1302,11 @@ class GraphExplainer:
             "feature names must match"
         self.fg = np.array(X)
         names = X.columns
-        rc = np.random.choice
         bg = np.array(self.bg)
         fg = self.fg
 
-        bg = bg[rc(len(bg), len(fg))] # share the same baseline across foreground
+        # share the same baseline across foreground        
+        bg = bg[np.zeros(len(fg)).astype(int)] 
         self.graph.baseline_sampler.update(
             dict((name,
                   self._idx_f(i, lambda i: \
@@ -1371,7 +1371,7 @@ def create_xgboost_f(parents, m, **kwargs):
         o = m.predict(xgboost.DMatrix(pd.DataFrame.from_dict(
             {n: args[i] for i, n in enumerate(parents)})), **kwargs)
 
-        if len(o) != bs: # discrete case
+        if len(o) != bs: # discrete xgboost model with softprob bs x n_class
             o = o.reshape(bs, -1)
         return o
 
@@ -1461,18 +1461,18 @@ def check_child_args_consistency(graph):
     return True
     
 def group_nodes(graph, nodes, name, verbose=False):
-    '''
-    Goup nodes into a single node that determines the value of each node in nodes.
-    Also groups the noise term for each node.
+    '''Goup nodes into a single node with "name" that determines the value of each
+    node in nodes. Also groups the noise term for each node.
 
     This function should be called after graph has been constructed and prepared
     with the appropriate noise nodes
 
     1. create a new noise node that combines the noise nodes of nodes
-    2. create a new node as the concatenation of output_nodes
-    3. reset nodes' dependency from input_nodes to the concatenation nodes
-    4. rewire input_nodes' children
+    2. create a new node with "name" as the concatenation of nodes
+    3. reset nodes' dependency from their input nodes to the concatenation nodes
+    4. rewire input nodes' children to point to the concatenation node
     5. check DAG holds after grouping: throw exception if not hold
+
     '''  
     
     def get_input_nodes(nodes):
