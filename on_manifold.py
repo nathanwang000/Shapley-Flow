@@ -2,7 +2,6 @@
 perform on manifold perturbation
 '''
 import sys
-sys.path = ['/home/jiaxuan/msr_intern_2020/shap'] + sys.path # todo: change hard code
 import pandas as pd
 import shap
 import numpy as np
@@ -25,16 +24,37 @@ class FeatureAttribution:
         l = len(self.input_names)
         return pd.DataFrame(self.values).rename(
             columns={i:name for i,name in zip(range(l), self.input_names)})
+
+    def print(self, sample_ind=-1, max_display=None, show=True, values=None):
+        l = len(self.input_names)
+        return pd.DataFrame(self.values).rename(
+            columns={i:name for i,name in zip(range(l), self.input_names)})\
+                                        .iloc[[sample_ind]]
     
-    def draw(self, sample_ind=-1, max_display=None, show=True, values=None):
-        if values is None: values = self.values
-        class D(): pass
-        b = D()
-        b.input_names = self.input_names
-        b.values = values[sample_ind]
-        b.data = None # np.arange(len(input_names))        
-        b.transform_history = []
-        shap.plots.bar(b, max_display=max_display, show=show)
+    def draw(self, sample_ind=-1, max_display=None, show=True, values=None,
+             fontsize=15):
+        l = len(self.input_names)        
+        df = pd.DataFrame(self.values).rename(
+            columns={i:name for i,name in zip(range(l), self.input_names)})\
+                                      .iloc[[sample_ind]]
+        data = df.T[sample_ind]
+        # sort by abs value
+        abs_data = data.abs().sort_values(ascending=True)
+        data = data.loc[abs_data.index]
+        if max_display:
+            data = data.iloc[-max_display:]
+        data.plot(kind='barh', fontsize=fontsize,
+                  color=(data > 0).map({False: "#008bfb", True: "#ff0051"}))
+    
+        # # shap version
+        # if values is None: values = self.values
+        # class D(): pass
+        # b = D()
+        # b.input_names = self.input_names
+        # b.values = values[sample_ind]
+        # b.data = None # np.arange(len(input_names))        
+        # b.transform_history = []
+        # shap.plots.bar(b, max_display=max_display, show=show)
 
 class OnManifoldExplainer:
 
