@@ -199,7 +199,7 @@ class Graph:
                 m = LinearRegression().fit(X_train, y_train)
                 node.f = create_linear_f([a.name for a in node.args], m.predict)
                 
-    def to_graphviz(self, rankdir="BT"):
+    def to_graphviz(self, rankdir="TB"):
         '''
         convert to graphviz format
         '''

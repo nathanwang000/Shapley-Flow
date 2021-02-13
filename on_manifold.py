@@ -45,16 +45,19 @@ class FeatureAttribution:
             data = data.iloc[-max_display:]
         data.plot(kind='barh', fontsize=fontsize,
                   color=(data > 0).map({False: "#008bfb", True: "#ff0051"}))
-    
-        # # shap version
-        # if values is None: values = self.values
-        # class D(): pass
-        # b = D()
-        # b.input_names = self.input_names
-        # b.values = values[sample_ind]
-        # b.data = None # np.arange(len(input_names))        
-        # b.transform_history = []
-        # shap.plots.bar(b, max_display=max_display, show=show)
+
+    def draw_old(self, sample_ind=-1, max_display=None, show=True, values=None,
+             fontsize=15):
+        assert False, "only for debugging"
+        # shap version
+        if values is None: values = self.values
+        class D(): pass
+        b = D()
+        b.input_names = self.input_names
+        b.values = values[sample_ind]
+        b.data = None # np.arange(len(input_names))        
+        b.transform_history = []
+        shap.plots.bar(b, max_display=max_display, show=show)
 
 class OnManifoldExplainer:
 
