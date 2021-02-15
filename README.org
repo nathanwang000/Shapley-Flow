@@ -60,3 +60,10 @@
       #+END_SRC
 
       
+   2. the multiprocessing setup
+
+      un-comment the following line in flow.py for multi-processing code
+      
+      #+BEGIN_SRC bash
+      # multiprocessing_setup() # this is needed for multiprocessing
+      #+END_SRC

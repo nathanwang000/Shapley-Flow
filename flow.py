@@ -40,7 +40,7 @@ def multiprocessing_setup():
 
     dill.settings['recurse'] = True # important for reloading with dill
 
-multiprocessing_setup()
+# multiprocessing_setup() # this is needed for multiprocessing
 
 class GraphIterator:
     '''
