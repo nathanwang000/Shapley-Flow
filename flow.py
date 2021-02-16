@@ -60,6 +60,40 @@ class GraphIterator:
         # end of iteration
         raise StopIteration
 
+class FlowDefaultDict(defaultdict):
+    '''
+    used to hold custom attribute
+    '''
+    pass
+
+def edge_credits2edge_credit(edge_credits, graph):
+    '''
+    a function to handle confidence interval related calculation following
+    https://link.springer.com/chapter/10.1007/978-3-030-57321-8_2
+
+    assume edge credits is a list of edge_credit, with keys being names
+
+    returns a single edge_credit instance with an attribute ecs that saves
+    all the edge credit; the keys are nodes in graph
+    '''
+    name2node = {node.name: node for node in graph}
+    res = FlowDefaultDict(lambda: FlowDefaultDict(int))
+    res.ecs = edge_credits
+
+    # calculate the mean value as its value
+    for i, ec in enumerate(edge_credits):
+        for node1, d in ec.items():
+            for node2, val in d.items():
+                assert type(node1) == str, "need str nodes"
+                res[name2node[node1]][name2node[node2]] += val
+
+    # devide credit by n
+    for node1, d in res.items():
+        for node2, val in d.items():
+            res[node1][node2] /= float(len(edge_credits))
+                
+    return res
+    
 class CausalLinks:
     '''
     a class to store causal links: both cause and effect are names of features
@@ -338,7 +372,7 @@ class CreditFlow:
     ''' the main algorithm to get a flow of information '''
     def __init__(self, graph, verbose=False, nruns=10,
                  visualize=False, fold_noise=True,
-                 silent=False, rankdir="TB"):
+                 silent=False, rankdir="TB", show_CI=False):
         ''' 
         graph: causal graph to explain
         verbose: whether to print out decision process        
@@ -349,6 +383,8 @@ class CreditFlow:
         fold_noise: whether to show noise node as a point
         silent: if true, overwrite visualize and verbose to False
                 and does not show progress bar
+        show_CI: whether to show confidence interval per
+                 https://link.springer.com/chapter/10.1007/978-3-030-57321-8_2
         '''
         # compute once to avoid compute again
         self.sorted_nodes = topo_sort(graph)
@@ -363,6 +399,7 @@ class CreditFlow:
         self.penwidth_stress = 5
         self.penwidth_normal = 1
         self.fold_noise = fold_noise
+        self.show_CI = show_CI
         self.rankdir = rankdir # for graph visualization could be LR
         self.silent = silent
         if silent:
@@ -424,7 +461,7 @@ class CreditFlow:
         return edge_credit
     
     def draw_asv(self, idx=-1, max_display=None, format_str="{:.2f}",
-                 flow_credit=None):
+                 flow_credit=None, show_fg_val=True):
         '''
         asv view only shows impact of source features
         assumes using ipython notebook
@@ -434,7 +471,13 @@ class CreditFlow:
         if flow_credit is None:
             flow_credit = self.edge_credit
 
-        edge_credit = defaultdict(lambda: defaultdict(int))
+        if type(flow_credit) == FlowDefaultDict and self.show_CI:
+            edge_credit = FlowDefaultDict(lambda: FlowDefaultDict(int))
+            edge_credit.ecs = [defaultdict(lambda: defaultdict(int)) for _ in \
+                               range(len(flow_credit.ecs))]
+        else:
+            edge_credit = defaultdict(lambda: defaultdict(int))
+            
         target_node = [node for node in self.graph if node.is_target_node][0]
         
         if isinstance(idx, Iterable):
@@ -450,18 +493,41 @@ class CreditFlow:
         for node1, d in flow_credit.items():
             for node2, val in d.items():
                 if len(node1.args) > 0: continue
+                name1, name2 = node1.name, node2.name
 
                 # set aggregate or individual mode
                 if isinstance(idx, Iterable):
                     edge_credit[node1][target_node] += np.mean(np.abs(val[idx]))
+
+                    # update individual runs if need confident interval
+                    if type(flow_credit) == FlowDefaultDict and self.show_CI:
+                        for i, ec in enumerate(flow_credit.ecs):
+                            edge_credit.ecs[i][node1.name][target_node.name] += \
+                                np.mean(np.abs(
+                                    ec[name1][name2][idx]))
+                    
                 else:
                     if idx < 0:
                         edge_credit[node1][target_node] += np.mean(np.abs(val))
+
+                        # update individual runs if need confident interval
+                        if type(flow_credit) == FlowDefaultDict and self.show_CI:
+                            for i, ec in enumerate(flow_credit.ecs):
+                                edge_credit.ecs[i][node1.name][target_node.name] += \
+                                    np.mean(np.abs(
+                                        ec[name1][name2]))
+                        
                     else:
                         edge_credit[node1][target_node] += val[idx]
+
+                        # update individual runs if need confident interval
+                        if type(flow_credit) == FlowDefaultDict and self.show_CI:
+                            for i, ec in enumerate(flow_credit.ecs):
+                                edge_credit.ecs[i][node1.name][target_node.name] += \
+                                    ec[name1][name2][idx]
                 
         G = self.credit2dot_pygraphviz(edge_credit, format_str,
-                                       new_idx, max_display)
+                                       new_idx, max_display, show_fg_val)
         viz_graph(G)
         return G
         
@@ -813,7 +879,19 @@ class CreditFlow:
             for node2, val in d.items():
                 
                 v = val
-                edge_label = format_str.format(v)
+                if type(edge_credit) == FlowDefaultDict and self.show_CI:
+                    '''
+                    following eqn 12 of https://link.springer.com/chapter/10.1007/978-3-030-57321-8_2
+                    '''
+                    vals = [ec[node1.name][node2.name] for ec in edge_credit.ecs]
+                    std = np.std(vals)
+                    n = len(edge_credit.ecs)
+                    # 95% CI
+                    a = 1.96 * std/np.sqrt(n)
+                    l, r = v - a, v + a
+                    edge_label = f"({l:.2f}, {v:.2f}, {r:.2f})"
+                else:
+                    edge_label = format_str.format(v)
                 if abs(v) < min_v: continue
                 if self.fold_noise and node1.is_noise_node:
                     continue # only visualize non noise node
@@ -890,7 +968,12 @@ class CreditFlow:
              if an iterable, assumes sum over the list of values
         max_display: max number of edges attribution to display
         '''
-        edge_credit = defaultdict(lambda: defaultdict(int))
+        if type(raw_edge_credit) == FlowDefaultDict and self.show_CI:
+            edge_credit = FlowDefaultDict(lambda: FlowDefaultDict(int))
+            edge_credit.ecs = [defaultdict(lambda: defaultdict(int)) for _ in \
+                               range(len(raw_edge_credit.ecs))]
+        else:
+            edge_credit = defaultdict(lambda: defaultdict(int))
 
         if isinstance(idx, Iterable):
             if len(idx) == 1:
@@ -907,17 +990,42 @@ class CreditFlow:
                 if node1.is_dummy_node:
                     # dummy node has one child and one parent
                     continue # should be covered in the next case
+
+                name1, name2 = node1.name, node2.name
                 if node2.is_dummy_node:
                     node2 = node2.children[0] 
 
                 # set aggregate or individual mode
                 if isinstance(idx, Iterable):
                     edge_credit[node1][node2] += np.mean(np.abs(val[idx]))
+
+                    # update individual runs if need confident interval
+                    if type(raw_edge_credit) == FlowDefaultDict and self.show_CI:
+                        for i, ec in enumerate(raw_edge_credit.ecs):
+                            edge_credit.ecs[i][node1.name][node2.name] += \
+                                np.mean(np.abs(
+                                    ec[name1][name2][idx]))
+                    
                 else:
                     if idx < 0:
                         edge_credit[node1][node2] += np.mean(np.abs(val))
+
+                        # update individual runs if need confident interval
+                        if type(raw_edge_credit) == FlowDefaultDict and self.show_CI:
+                            for i, ec in enumerate(raw_edge_credit.ecs):
+                                edge_credit.ecs[i][node1.name][node2.name] += \
+                                    np.mean(np.abs(
+                                        ec[name1][name2]))
+                        
                     else:
                         edge_credit[node1][node2] += val[idx]
+
+                        # update individual runs if need confident interval
+                        if type(raw_edge_credit) == FlowDefaultDict and self.show_CI:
+                            for i, ec in enumerate(raw_edge_credit.ecs):
+                                edge_credit.ecs[i][node1.name][node2.name] += \
+                                    ec[name1][name2][idx]
+                        
 
         return self.credit2dot_pygraphviz(edge_credit, format_str,
                                           new_idx, max_display,
