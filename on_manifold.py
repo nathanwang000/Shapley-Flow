@@ -17,7 +17,12 @@ class FeatureAttribution:
     e.g. shap.plots.bar(self)
     '''
     def __init__(self, values, input_names):
-        self.values = values
+        # values: (n, d) or (n, d, nruns)
+        if len(values.shape) == 2:
+            n, d = values.shape
+            self.values = values.reshape(n, d, 1)
+        else:
+            self.values = values
         self.input_names = input_names
 
     def df(self, max_display=None, show=True, values=None):
@@ -30,34 +35,41 @@ class FeatureAttribution:
         return pd.DataFrame(self.values).rename(
             columns={i:name for i,name in zip(range(l), self.input_names)})\
                                         .iloc[[sample_ind]]
+
+    def __add__(self, other):
+        assert other.input_names == self.input_names, "input name must match"
+        return FeatureAttribution(np.concatenate([self.values, other.values], 2),
+                                  self.input_names)
+
+    def __radd__(self, other):
+        return self
     
     def draw(self, sample_ind=-1, max_display=None, show=True, values=None,
              fontsize=15):
-        l = len(self.input_names)        
-        df = pd.DataFrame(self.values).rename(
+        l = len(self.input_names)
+        
+        # mean
+        df = pd.DataFrame(np.mean(self.values, 2)).rename(
             columns={i:name for i,name in zip(range(l), self.input_names)})\
                                       .iloc[[sample_ind]]
         data = df.T[sample_ind]
+
+        # std
+        df = pd.DataFrame(np.std(self.values, 2)).rename(
+            columns={i:name for i,name in zip(range(l), self.input_names)})\
+                                      .iloc[[sample_ind]]
+        std = df.T[sample_ind]
+        
         # sort by abs value
         abs_data = data.abs().sort_values(ascending=True)
         data = data.loc[abs_data.index]
+        std = std.loc[abs_data.index] / np.sqrt(self.values.shape[2]) * 1.96
         if max_display:
             data = data.iloc[-max_display:]
-        data.plot(kind='barh', fontsize=fontsize,
-                  color=(data > 0).map({False: "#008bfb", True: "#ff0051"}))
+            std = std.iloc[-max_display:]
 
-    def draw_old(self, sample_ind=-1, max_display=None, show=True, values=None,
-             fontsize=15):
-        assert False, "only for debugging"
-        # shap version
-        if values is None: values = self.values
-        class D(): pass
-        b = D()
-        b.input_names = self.input_names
-        b.values = values[sample_ind]
-        b.data = None # np.arange(len(input_names))        
-        b.transform_history = []
-        shap.plots.bar(b, max_display=max_display, show=show)
+        data.plot(kind='barh', fontsize=fontsize, xerr=std,
+                  color=(data > 0).map({False: "#008bfb", True: "#ff0051"}))
 
 class OnManifoldExplainer:
 
