@@ -85,7 +85,10 @@ def edge_credits2edge_credit(edge_credits, graph):
         for node1, d in ec.items():
             for node2, val in d.items():
                 assert type(node1) == str, "need str nodes"
-                res[name2node[node1]][name2node[node2]] += val
+                try:
+                    res[name2node[node1]][name2node[node2]] += val
+                except Exception as e:
+                    print('error', node1, node2, np.sum(val))
 
     # devide credit by n
     for node1, d in res.items():
