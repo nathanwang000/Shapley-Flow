@@ -27,12 +27,12 @@ class FeatureAttribution:
 
     def df(self, max_display=None, show=True, values=None):
         l = len(self.input_names)
-        return pd.DataFrame(self.values).rename(
+        return pd.DataFrame(np.mean(self.values, 2)).rename(
             columns={i:name for i,name in zip(range(l), self.input_names)})
 
     def print(self, sample_ind=-1, max_display=None, show=True, values=None):
         l = len(self.input_names)
-        return pd.DataFrame(self.values).rename(
+        return pd.DataFrame(np.mean(self.values,2)).rename(
             columns={i:name for i,name in zip(range(l), self.input_names)})\
                                         .iloc[[sample_ind]]
 
@@ -227,7 +227,7 @@ class OnManifoldExplainer:
         self.values = np.zeros((n_fg, d))
 
         nruns = self.nruns if self.nruns <= math.factorial(d) else math.factorial(d)
-        for sample in tqdm.trange(len(X)):
+        for sample in tqdm.trange(len(X), desc="manifold bg samples"):
             permutations = itertools.permutations(list(range(d)))
             x = np.array(X)[sample]
             for i in range(nruns):
@@ -264,7 +264,6 @@ class IndExplainer:
         # this only support single baseline, see ipynb how to use
         # linearity to compute multiple baseline ind explainer
         self.bg = np.array(X[:1]) 
-        self.bg_dist = np.array(X)
         self.feature_names =  list(X.columns)
         self.f = f
 

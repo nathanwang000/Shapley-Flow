@@ -85,10 +85,10 @@ def edge_credits2edge_credit(edge_credits, graph):
         for node1, d in ec.items():
             for node2, val in d.items():
                 assert type(node1) == str, "need str nodes"
-                try:
+                try: # to account for noise node that isn't present in graph
                     res[name2node[node1]][name2node[node2]] += val
                 except Exception as e:
-                    print('error', node1, node2, np.sum(val))
+                    print(f'{node1}->{node2}: {np.sum(val):.3f} does not exist')
 
     # devide credit by n
     for node1, d in res.items():
@@ -1219,17 +1219,19 @@ class ParallelCreditFlow:
 
 class GraphExplainer:
 
-    def __init__(self, graph, bg, nruns=100):
+    def __init__(self, graph, bg, nruns=100, silent=False):
         '''
         graph: graph to explain
         bg: background values, assumes dataframe
         nruns: how many runs for each data point
+        silent: show progress bar or not
         '''
         assert isinstance(bg, pd.DataFrame), \
             "assume data frame with column names matching node names"
         
         self.graph = copy.deepcopy(graph)
         self.nruns = nruns
+        self.silent = silent
 
         '''only support one baseline, for multiple baseline 
         see ipython notebook for multiple baseline:
@@ -1454,7 +1456,8 @@ class GraphExplainer:
                 warnings.warn("maybe you want to skip prepare")
                 raise e
             
-        cf = CreditFlow(self.graph, nruns=self.nruns, rankdir=rankdir)
+        cf = CreditFlow(self.graph, nruns=self.nruns, rankdir=rankdir,
+                        silent=self.silent)
         cf.run(method, len_bg=len(self.bg))
         return cf
 
