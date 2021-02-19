@@ -23,4 +23,22 @@
   - [[./on_manifold.py][Implementation of the on-manifold SHAP baseline]]
   - [[./linear_evaluation.py][Evaluation code for paper Section 4.3]]
 
+** Installation
 
+   Install dependencies using pipenv
+   
+   #+BEGIN_SRC bash
+   pip install pipenv
+   pipenv shell # create a shell that can later deactivate by Ctrl-d
+   pipenv install # install all packages in Pipfile
+   #+END_SRC
+   
+   We rely on pygraphviz for visualization. Installing pygraphviz requires to
+   install graphviz first, see this [[https://stackoverflow.com/questions/40266604/pip-install-pygraphviz-fails-failed-building-wheel-for-pygraphviz][post]] if pygraphviz fails to
+   install.
+
+   One can check that the installation works:
+   #+BEGIN_SRC bash
+   python flow.py # should output a print out of flow credit for a sample graph
+   #+END_SRC
+   
