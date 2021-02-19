@@ -25,23 +25,6 @@ import dill
 from sklearn.model_selection import train_test_split
 from sklearn.linear_model import LinearRegression
 
-def multiprocessing_setup():
-    '''
-    deal with deadlock using fork in mp due to not
-    copying threads form numpy
-    '''
-    if mp.get_start_method(allow_none=True) != "spawn":
-        if mp.get_start_method(allow_none=True) is not None:
-            warnings.warn("cannot set multiprocessing to spawn, \
-            use ParallelCreditFlow with caution")
-        else:
-            # important for not deadlock with numpy for using dill
-            mp.set_start_method("spawn")
-
-    dill.settings['recurse'] = True # important for reloading with dill
-
-# multiprocessing_setup() # this is needed for multiprocessing
-
 class GraphIterator:
     '''
     iterator for nodes in a graph
@@ -60,43 +43,6 @@ class GraphIterator:
         # end of iteration
         raise StopIteration
 
-class FlowDefaultDict(defaultdict):
-    '''
-    used to hold custom attribute
-    '''
-    pass
-
-def edge_credits2edge_credit(edge_credits, graph):
-    '''
-    a function to handle confidence interval related calculation following
-    https://link.springer.com/chapter/10.1007/978-3-030-57321-8_2
-
-    assume edge credits is a list of edge_credit, with keys being names
-
-    returns a single edge_credit instance with an attribute ecs that saves
-    all the edge credit; the keys are nodes in graph
-    '''
-    name2node = {node.name: node for node in graph}
-    res = FlowDefaultDict(lambda: FlowDefaultDict(int))
-    res.ecs = edge_credits
-
-    # calculate the mean value as its value
-    for i, ec in enumerate(edge_credits):
-        for node1, d in ec.items():
-            for node2, val in d.items():
-                assert type(node1) == str, "need str nodes"
-                try: # to account for noise node that isn't present in graph
-                    res[name2node[node1]][name2node[node2]] += val
-                except Exception as e:
-                    print(f'{node1}->{node2}: {np.sum(val):.3f} does not exist')
-
-    # devide credit by n
-    for node1, d in res.items():
-        for node2, val in d.items():
-            res[node1][node2] /= float(len(edge_credits))
-                
-    return res
-    
 class CausalLinks:
     '''
     a class to store causal links: both cause and effect are names of features
@@ -210,7 +156,7 @@ class Graph:
                 xgb_test = xgboost.DMatrix(X_test, label=y_test)
 
                 if node.is_categorical:
-                    num_class = len(np.unique(X[name]))
+                    num_class = len(np.unique(X[node.name]))
                     params = {
                         "eta": 0.002,
                         "max_depth": 3,
@@ -370,6 +316,12 @@ class Node:
         
     def __repr__(self):
         return self.name
+
+class FlowDefaultDict(defaultdict):
+    '''
+    used to hold custom attribute
+    '''
+    pass
 
 class CreditFlow:
     ''' the main algorithm to get a flow of information '''
@@ -1034,189 +986,6 @@ class CreditFlow:
                                           new_idx, max_display,
                                           show_fg_val)
 
-class ParallelCreditFlow:
-    '''
-        An embarassingly parallel implementaion of credit flow
-
-        graph: causal graph to explain
-        nruns: number of sampled valid timelines and permutations
-        fold_noise: whether to show noise node as a point
-        njobs: number of parallel jobs
-    '''
-    
-    def __init__(self, graph, nruns=10, njobs=1, fold_noise=True):
-        njobs = min(nruns, njobs)
-        self.cf = CreditFlow(graph,
-                             nruns=nruns // njobs,
-                             silent=False,
-                             fold_noise=fold_noise)
-        self.cf.reset() # to get baseline and target setup
-        self.njobs = njobs
-        self.nruns = nruns
-        self.graph = graph
-        print(f"{nruns} runs with {njobs} jobs")
-
-        def wrap_run(cf):
-            cf.run()
-
-            edge_credit = {}
-            for node1, d in cf.edge_credit.items():
-                for node2, val in d.items():
-                    if node1.name not in edge_credit:
-                        edge_credit[node1.name] = {}
-                    if node2.name not in edge_credit[node1.name]:
-                        edge_credit[node1.name][node2.name] = 0
-                    edge_credit[node1.name][node2.name] += val
-
-            return edge_credit
-
-        self.wrap_run = wrap_run
-
-    def run_subprocess(self):
-        '''
-        run with subprocess
-        problem: too slow
-
-        1. serialize self.cf: s = dill.dumps(self.cf)
-        2. pass s to an external file that does wrap_run
-        3. serialize its output with dill and print to output
-        4. use subprocess to capture the output and convert back to dict
-        '''
-        pwd = os.path.dirname(os.path.realpath(__file__))
-        temp_dir = f"{pwd}/tmp"
-        os.system(f'mkdir -p {temp_dir}')
-        
-        fns = [unique_filename(temp_dir) for _ in range(self.njobs + 1)]
-        with open(fns[0], 'wb') as f:
-            dill.dump(self.cf, f)
-
-        procs = []
-        commands = [["python", f"{pwd}/wrap_run.py", fns[0], fns[i+1]]\
-                    for i in range(self.njobs)]
-        for command in commands:
-            p = subprocess.Popen(command)
-            procs.append(p)
-
-        # join
-        while True:
-            job_status = [p.poll() == None for p in procs]
-            if sum(job_status) > 0: # job active
-                print(f"wait {job_status}...")
-                time.sleep(1)
-            else:
-                break
-
-        print("done")
-        edge_credit_list = [dill.load(open(fns[i+1], "rb")) \
-                            for i in range(self.njobs)]
-        
-        # combine edge credits
-        name2node = dict((node.name, node) for node in self.cf.graph)
-        for edge_credit in edge_credit_list:
-            for node1_name, d in edge_credit.items():
-                for node2_name, val in d.items():
-                    self.cf.edge_credit[name2node[node1_name]]\
-                        [name2node[node2_name]] +=  val / len(edge_credit_list)
-
-        # clean up temp files
-        subprocess.Popen(['rm', f"{temp_dir}/*"])
-
-    def run_dill(self):
-        '''
-        multi-processing can avoid deadlock by using the "spawn" method,
-        but, it doesn't pickle closures correctly. This method uses dill
-        to do the pickling and then attempt to set "spawn" if possible
-        problem: still not fast, similar speed as subprocess
-        '''
-
-        if mp.get_start_method(allow_none=True) != "spawn":
-            warnings.warn("May deadlock with numpy! Plz set\
-            multiprocessing: mp.set_start_method('spawn')")
-            
-        pool = mp.Pool(self.njobs)
-        cf_str = dill.dumps(self.cf)
-        edge_credit_list = pool.map(dill_run,
-                                    [cf_str for _ in range(self.njobs)])
-
-        # combine edge credits
-        name2node = dict((node.name, node) for node in self.cf.graph)
-        for edge_credit in edge_credit_list:
-            for node1_name, d in edge_credit.items():
-                for node2_name, val in d.items():
-                    self.cf.edge_credit[name2node[node1_name]]\
-                        [name2node[node2_name]] += val / len(edge_credit_list)
-
-    def run_thread(self):
-        '''
-        use thread form joblib, but still prob b/c of GIL
-        '''
-        cfs = [CreditFlow(copy.deepcopy(self.graph),
-                          nruns=self.nruns // self.njobs,
-                          silent=True) for _ in range(self.njobs)]
-
-        joblib.Parallel(n_jobs=self.njobs, prefer="threads")\
-            (joblib.delayed(cf.run)()\
-             for cf in cfs)
-
-        # combine edge credits
-        name2node = dict((node.name, node) for node in self.cf.graph)
-        for cf in cfs:
-            edge_credit = cf.edge_credit
-            for node1, d in edge_credit.items():
-                for node2, val in d.items():
-                    self.cf.edge_credit[name2node[node1.name]]\
-                        [name2node[node2.name]] +=  val / self.njobs
-
-    def run_synthetic_process(self, method='mpd'):
-        '''
-        best for the random synthetic data
-        
-        problem:
-        - may deadlock due to numpy's lock
-        - labmda not work with mp and joblib
-        - mp_on_dill does not work with "spawn"
-
-        deadlock can be solved by changing from "fork" to "spawn", but mpd
-        does not work with "spawn"
-
-        later: investigate how to let it work with spawn
-
-        method:
-        'mpd': multiprocessing-on-dill
-        'pathos': pathos
-
-        Therefore this function cannot work with multi threading
-        '''
-        warnings.warn("May deadlock with numpy!")
-        if method == 'mpd':
-            import multiprocessing_on_dill as mpd
-            pool = mpd.Pool(self.njobs)
-        elif method == 'pathos':
-            from pathos.pools import ProcessPool
-            pool = ProcessPool(nodes=self.njobs)
-            
-        else:
-            assert False, f"unkonwn method: {method}"
-        
-        # fill in edge_credit
-        edge_credit_list = pool.map(self.wrap_run,
-                                    [self.cf for _ in range(self.njobs)])
-        
-
-        # combine edge credits
-        name2node = dict((node.name, node) for node in self.cf.graph)
-        for edge_credit in edge_credit_list:
-            for node1_name, d in edge_credit.items():
-                for node2_name, val in d.items():
-                    self.cf.edge_credit[name2node[node1_name]]\
-                        [name2node[node2_name]] +=  val / len(edge_credit_list)
-
-    def draw(self, *args, **kwargs):
-        return self.cf.draw(*args, **kwargs)
-
-    def draw_asv(self, *args, **kwargs):
-        return self.cf.draw_asv(*args, **kwargs)
-
 class GraphExplainer:
 
     def __init__(self, graph, bg, nruns=100, silent=False):
@@ -1254,7 +1023,7 @@ class GraphExplainer:
 
         Assumptions:
         1. if the computation function output a (n, d) matrix: then we 
-        assume the variable is discrete, otherwise we assume it is 
+        assume the variable is categorical, otherwise we assume it is 
         continuous
         
         determine the following attribute for noise
@@ -1461,6 +1230,205 @@ class GraphExplainer:
         cf.run(method, len_bg=len(self.bg))
         return cf
 
+# multiprocessing_setup() # parallel credit flow set up
+def multiprocessing_setup():
+    '''
+    deal with deadlock using fork in mp due to not
+    copying threads form numpy
+    '''
+    if mp.get_start_method(allow_none=True) != "spawn":
+        if mp.get_start_method(allow_none=True) is not None:
+            warnings.warn("cannot set multiprocessing to spawn, \
+            use ParallelCreditFlow with caution")
+        else:
+            # important for not deadlock with numpy for using dill
+            mp.set_start_method("spawn")
+
+    dill.settings['recurse'] = True # important for reloading with dill
+
+class ParallelCreditFlow:
+    '''
+        An embarassingly parallel implementaion of credit flow
+
+        graph: causal graph to explain
+        nruns: number of sampled valid timelines and permutations
+        fold_noise: whether to show noise node as a point
+        njobs: number of parallel jobs
+    '''
+    
+    def __init__(self, graph, nruns=10, njobs=1, fold_noise=True):
+        njobs = min(nruns, njobs)
+        self.cf = CreditFlow(graph,
+                             nruns=nruns // njobs,
+                             silent=False,
+                             fold_noise=fold_noise)
+        self.cf.reset() # to get baseline and target setup
+        self.njobs = njobs
+        self.nruns = nruns
+        self.graph = graph
+        print(f"{nruns} runs with {njobs} jobs")
+
+        def wrap_run(cf):
+            cf.run()
+
+            edge_credit = {}
+            for node1, d in cf.edge_credit.items():
+                for node2, val in d.items():
+                    if node1.name not in edge_credit:
+                        edge_credit[node1.name] = {}
+                    if node2.name not in edge_credit[node1.name]:
+                        edge_credit[node1.name][node2.name] = 0
+                    edge_credit[node1.name][node2.name] += val
+
+            return edge_credit
+
+        self.wrap_run = wrap_run
+
+    def run_subprocess(self):
+        '''
+        run with subprocess
+        problem: too slow
+
+        1. serialize self.cf: s = dill.dumps(self.cf)
+        2. pass s to an external file that does wrap_run
+        3. serialize its output with dill and print to output
+        4. use subprocess to capture the output and convert back to dict
+        '''
+        pwd = os.path.dirname(os.path.realpath(__file__))
+        temp_dir = f"{pwd}/tmp"
+        os.system(f'mkdir -p {temp_dir}')
+        
+        fns = [unique_filename(temp_dir) for _ in range(self.njobs + 1)]
+        with open(fns[0], 'wb') as f:
+            dill.dump(self.cf, f)
+
+        procs = []
+        commands = [["python", f"{pwd}/archive/wrap_run.py", fns[0], fns[i+1]]\
+                    for i in range(self.njobs)]
+        for command in commands:
+            p = subprocess.Popen(command)
+            procs.append(p)
+
+        # join
+        while True:
+            job_status = [p.poll() == None for p in procs]
+            if sum(job_status) > 0: # job active
+                print(f"wait {job_status}...")
+                time.sleep(1)
+            else:
+                break
+
+        print("done")
+        edge_credit_list = [dill.load(open(fns[i+1], "rb")) \
+                            for i in range(self.njobs)]
+        
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for edge_credit in edge_credit_list:
+            for node1_name, d in edge_credit.items():
+                for node2_name, val in d.items():
+                    self.cf.edge_credit[name2node[node1_name]]\
+                        [name2node[node2_name]] +=  val / len(edge_credit_list)
+
+        # clean up temp files
+        subprocess.Popen(['rm', f"{temp_dir}/*"])
+
+    def run_dill(self):
+        '''
+        multi-processing can avoid deadlock by using the "spawn" method,
+        but, it doesn't pickle closures correctly. This method uses dill
+        to do the pickling and then attempt to set "spawn" if possible
+        problem: still not fast, similar speed as subprocess
+        '''
+
+        if mp.get_start_method(allow_none=True) != "spawn":
+            warnings.warn("May deadlock with numpy! Plz set\
+            multiprocessing: mp.set_start_method('spawn')")
+            
+        pool = mp.Pool(self.njobs)
+        cf_str = dill.dumps(self.cf)
+        edge_credit_list = pool.map(dill_run,
+                                    [cf_str for _ in range(self.njobs)])
+
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for edge_credit in edge_credit_list:
+            for node1_name, d in edge_credit.items():
+                for node2_name, val in d.items():
+                    self.cf.edge_credit[name2node[node1_name]]\
+                        [name2node[node2_name]] += val / len(edge_credit_list)
+
+    def run_thread(self):
+        '''
+        use thread form joblib, but still prob b/c of GIL
+        '''
+        cfs = [CreditFlow(copy.deepcopy(self.graph),
+                          nruns=self.nruns // self.njobs,
+                          silent=True) for _ in range(self.njobs)]
+
+        joblib.Parallel(n_jobs=self.njobs, prefer="threads")\
+            (joblib.delayed(cf.run)()\
+             for cf in cfs)
+
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for cf in cfs:
+            edge_credit = cf.edge_credit
+            for node1, d in edge_credit.items():
+                for node2, val in d.items():
+                    self.cf.edge_credit[name2node[node1.name]]\
+                        [name2node[node2.name]] +=  val / self.njobs
+
+    def run_synthetic_process(self, method='mpd'):
+        '''
+        best for the random synthetic data
+        
+        problem:
+        - may deadlock due to numpy's lock
+        - labmda not work with mp and joblib
+        - mp_on_dill does not work with "spawn"
+
+        deadlock can be solved by changing from "fork" to "spawn", but mpd
+        does not work with "spawn"
+
+        later: investigate how to let it work with spawn
+
+        method:
+        'mpd': multiprocessing-on-dill
+        'pathos': pathos
+
+        Therefore this function cannot work with multi threading
+        '''
+        warnings.warn("May deadlock with numpy!")
+        if method == 'mpd':
+            import multiprocessing_on_dill as mpd
+            pool = mpd.Pool(self.njobs)
+        elif method == 'pathos':
+            from pathos.pools import ProcessPool
+            pool = ProcessPool(nodes=self.njobs)
+            
+        else:
+            assert False, f"unkonwn method: {method}"
+        
+        # fill in edge_credit
+        edge_credit_list = pool.map(self.wrap_run,
+                                    [self.cf for _ in range(self.njobs)])
+        
+
+        # combine edge credits
+        name2node = dict((node.name, node) for node in self.cf.graph)
+        for edge_credit in edge_credit_list:
+            for node1_name, d in edge_credit.items():
+                for node2_name, val in d.items():
+                    self.cf.edge_credit[name2node[node1_name]]\
+                        [name2node[node2_name]] +=  val / len(edge_credit_list)
+
+    def draw(self, *args, **kwargs):
+        return self.cf.draw(*args, **kwargs)
+
+    def draw_asv(self, *args, **kwargs):
+        return self.cf.draw_asv(*args, **kwargs)
+
 ##### helper functions
 # graph visualization
 def create_linear_f(parents, m, **kwargs):
@@ -1485,8 +1453,9 @@ def create_xgboost_f(parents, m, **kwargs):
         o = m.predict(xgboost.DMatrix(pd.DataFrame.from_dict(
             {n: args[i] for i, n in enumerate(parents)})), **kwargs)
 
-        if len(o) != bs: # discrete xgboost model with softprob bs x n_class
+        if len(o) != bs: # categorical xgboost model with softprob bs x n_class
             o = o.reshape(bs, -1)
+
         return o
 
     return f_
@@ -1545,6 +1514,48 @@ def translator(names, X, X_display):
         res[name] = f(X[i], X_display[i])
     return res
 
+def node_dict2str_dict(node_edge_credit):
+    '''
+    convert node edge credit to node name edge credit
+    node name is easier to carry between graphs
+    '''
+    res = defaultdict(lambda: defaultdict(int))
+    for node1, d in node_edge_credit.items():
+        for node2, val in d.items():
+            res[node1.name][node2.name] = val
+    return res
+
+def edge_credits2edge_credit(edge_credits, graph):
+    '''
+    a function to handle confidence interval related calculation following
+    https://link.springer.com/chapter/10.1007/978-3-030-57321-8_2
+
+    assume edge credits is a list of edge_credit, with keys being names
+
+    returns a single edge_credit instance with an attribute ecs that saves
+    all the edge credit; the keys are nodes in graph
+    '''
+    name2node = {node.name: node for node in graph}
+    res = FlowDefaultDict(lambda: FlowDefaultDict(int))
+    res.ecs = edge_credits
+
+    # calculate the mean value as its value
+    for i, ec in enumerate(edge_credits):
+        for node1, d in ec.items():
+            for node2, val in d.items():
+                assert type(node1) == str, "need str nodes"
+                try: # to account for noise node that isn't present in graph
+                    res[name2node[node1]][name2node[node2]] += val
+                except Exception as e:
+                    print(f'{node1}->{node2}: {np.sum(val):.3f} does not exist')
+
+    # devide credit by n
+    for node1, d in res.items():
+        for node2, val in d.items():
+            res[node1][node2] /= float(len(edge_credits))
+                
+    return res
+    
 # graph algorithms
 def check_unique_node_names(graph):
     '''
