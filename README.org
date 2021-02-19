@@ -7,8 +7,8 @@
 
   ~notebooks/~ contains case studies and experiments for the paper 
   
-  - [[./notebook/tutorial.ipynb][Tutorial for Shapley Flow]]
-  - [[./notebook/synthetic_sanity_checks.ipynb][Sanity check examples for Section 4.3]]
+  - [[./notebooks/tutorial.ipynb][Tutorial for Shapley Flow]]
+  - [[./notebooks/synthetic_sanity_checks.ipynb][Sanity check examples for Section 4.3]]
   - [[./notebooks/linear_nutrition.ipynb][Experiments with the nutrition dataset for sanity check with linear model in Section 4.3]]
   - [[./notebooks/linear_income.ipynb][Experiments with the adult censor income dataset for sanity check with linear model]]
   - [[./notebooks/nutrition.ipynb][Case study of the nutrition dataset in Section 4.4]]
