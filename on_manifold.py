@@ -1,5 +1,7 @@
 '''
-perform on manifold perturbation
+python version of on manifold SHAP as described in 
+
+Aas, Kjersti, Martin Jullum, and Anders Løland. "Explaining individual predictions when features are dependent: More accurate approximations to Shapley values." arXiv preprint arXiv:1903.10464 (2019).
 '''
 import sys
 import pandas as pd

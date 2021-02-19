@@ -1,0 +1,69 @@
+* Shapley Flow
+
+  Shapley value flow
+  
+  Sample experiments in [[./flow_synthetic_experiments.ipynb][notebook]]
+
+** versions
+
+   version 0: once a node's value is changed, make it visible to the output
+
+   version 1: only expose a node's new value if the edge to the target is
+   opened. This requires each node to keep track of its argument's value.
+   Difference from version 0 is in dfs part.
+
+** installation instructions
+
+   We require the master version of the package shap placed in the directory to
+   run the notebooks.
+
+   There has been issues installing pygraphviz. First make sure graphviz is
+   installed.  Then make sure you installed python-dev for the specific python
+   version you are using:
+
+   #+BEGIN_SRC bash
+   apt-get install pythonX.X-dev # e.g python3.8-dev; I'm using python3.8
+   #+END_SRC
+
+   Then one should be able to install pygraphviz with
+
+   #+BEGIN_SRC bash
+   pip install pygraphviz # or "pip install --install-option="--include-path=/usr/local/include/" --install-option="--library-path=/usr/local/lib/" pygraphviz" as noted in https://github.com/pygraphviz/pygraphviz/issues/100
+   #+END_SRC
+   
+** sanity check graphs
+
+   The [[./sanity_check_graphs.ipynb][notebook]] contains sanity check graphs for various flow approaches.
+
+** python version
+
+   requires python 3.8.2
+
+   requirements are listed in [[./Pipefile][pipefile]]
+   
+** development notes
+
+   1. schools server: mld3 seems very slow to run xgboost models, but
+      explanation seems to run fine. This is not a huge issue but worth
+      investigating why
+      
+      The solution is to limit the amount of numpy threads. The following script
+      would do the trick:
+
+      #+BEGIN_SRC python
+      import os # need to happen before loading numpy
+      os.environ["OMP_NUM_THREADS"] = "8" # export OMP_NUM_THREADS=8
+      os.environ["OPENBLAS_NUM_THREADS"] = "8" # export OPENBLAS_NUM_THREADS=8
+      os.environ["MKL_NUM_THREADS"] = "8" # export MKL_NUM_THREADS=8
+      os.environ["VECLIB_MAXIMUM_THREADS"] = "8" # export VECLIB_MAXIMUM_THREADS=8
+      os.environ["NUMEXPR_NUM_THREADS"] = "8" # export NUMEXPR_NUM_THREADS=8
+      #+END_SRC
+
+      
+   2. the multiprocessing setup
+
+      un-comment the following line in flow.py for multi-processing code
+      
+      #+BEGIN_SRC bash
+      # multiprocessing_setup() # this is needed for multiprocessing
+      #+END_SRC

@@ -1,69 +1,27 @@
-* MSR intern 2020
+* Shapley Flow
 
-  Shapley value flow
+  This repository contains implementation for the AISTATS 2021 paper 
+  "[[https://arxiv.org/pdf/2010.14592.pdf][Shapley Flow: A Graph-based Approach to Interpreting Model Predictions]]".
   
-  Sample experiments in [[./flow_synthetic_experiments.ipynb][notebook]]
+  The directory is organized as the following. Files in the current directory
+  include implementations of the algorithm and baselines.
 
-** versions
+  #+BEGIN_VERSE
+  flow.py: Implementation of the Shapley Flow algorithm
+  on_manifold.py: Implementation of the on-manifold SHAP baseline
+  linear_evaluation.py: Evaluation code for paper Section 4.3
+  #+END_VERSE
 
-   version 0: once a node's value is changed, make it visible to the output
+  ~notebooks/~ contains case studies and experiments for the paper
 
-   version 1: only expose a node's new value if the edge to the target is
-   opened. This requires each node to keep track of its argument's value.
-   Difference from version 0 is in dfs part.
+  #+BEGIN_VERSE
+  [[./notebook/tutorial.ipynb][notebook/tutorial.ipynb]]: Tutorial for Shapley Flow
+  [[./notebook/synthetic_sanity_checks.ipynb][notebook/synthetic_sanity_checks.ipynb]]: Sanity check examples for Section 4.3
+  notebooks/linear_nutrition.ipynb: Experiments with the nutrition dataset for sanity check with linear model in Section 4.3
+  notebooks/linear_income.ipynb: Experiments with the adult censor income dataset for sanity check with linear model
+  notebooks/nutrition.ipynb: Case study of the nutrition dataset in Section 4.4
+  notebooks/income.ipynb: Case study of the adult censor income dataset in the Appendix
+  notebooks/nutrition_CI.ipynb: Case study of the nutrition dataset with multiple baseline and 95% confidence interval
+  #+END_VERSE
 
-** installation instructions
-
-   We require the master version of the package shap placed in the directory to
-   run the notebooks.
-
-   There has been issues installing pygraphviz. First make sure graphviz is
-   installed.  Then make sure you installed python-dev for the specific python
-   version you are using:
-
-   #+BEGIN_SRC bash
-   apt-get install pythonX.X-dev # e.g python3.8-dev; I'm using python3.8
-   #+END_SRC
-
-   Then one should be able to install pygraphviz with
-
-   #+BEGIN_SRC bash
-   pip install pygraphviz # or "pip install --install-option="--include-path=/usr/local/include/" --install-option="--library-path=/usr/local/lib/" pygraphviz" as noted in https://github.com/pygraphviz/pygraphviz/issues/100
-   #+END_SRC
-   
-** sanity check graphs
-
-   The [[./sanity_check_graphs.ipynb][notebook]] contains sanity check graphs for various flow approaches.
-
-** python version
-
-   requires python 3.8.2
-
-   requirements are listed in [[./Pipefile][pipefile]]
-   
-** development notes
-
-   1. schools server: mld3 seems very slow to run xgboost models, but
-      explanation seems to run fine. This is not a huge issue but worth
-      investigating why
-      
-      The solution is to limit the amount of numpy threads. The following script
-      would do the trick:
-
-      #+BEGIN_SRC python
-      import os # need to happen before loading numpy
-      os.environ["OMP_NUM_THREADS"] = "8" # export OMP_NUM_THREADS=8
-      os.environ["OPENBLAS_NUM_THREADS"] = "8" # export OPENBLAS_NUM_THREADS=8
-      os.environ["MKL_NUM_THREADS"] = "8" # export MKL_NUM_THREADS=8
-      os.environ["VECLIB_MAXIMUM_THREADS"] = "8" # export VECLIB_MAXIMUM_THREADS=8
-      os.environ["NUMEXPR_NUM_THREADS"] = "8" # export NUMEXPR_NUM_THREADS=8
-      #+END_SRC
-
-      
-   2. the multiprocessing setup
-
-      un-comment the following line in flow.py for multi-processing code
-      
-      #+BEGIN_SRC bash
-      # multiprocessing_setup() # this is needed for multiprocessing
-      #+END_SRC
+  ~archive/~ include note and experiments for previous iterations of the project.
