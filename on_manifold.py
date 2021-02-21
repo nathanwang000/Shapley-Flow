@@ -76,7 +76,7 @@ class FeatureAttribution:
 class OnManifoldExplainer:
 
     def __init__(self, f, X, nruns=100, sigma_sq=0.1, orderings=None,
-                 single_bg=True):
+                 single_bg=True, silent=False):
         '''
         f: the model to explain, when called evaluate the model
         X: background value samples from X, assumes dataframe
@@ -85,6 +85,7 @@ class OnManifoldExplainer:
                    it is a list of list (inner list contains permutation
                    of indices); this is useful for ASV
         sigma: kernel width, per Aas et al. 2019
+        silent: whether to show the progress bar
         '''
         self.nruns = nruns
         self.bg = np.array(X[:1]) # for single bg case
@@ -94,6 +95,7 @@ class OnManifoldExplainer:
         self.sigma_sq = sigma_sq
         self.orderings = orderings
         self.single_bg = single_bg
+        self.silent = silent
 
     def mahalanobis_dist_sq(self, v1, v2, c):
         '''
@@ -229,7 +231,12 @@ class OnManifoldExplainer:
         self.values = np.zeros((n_fg, d))
 
         nruns = self.nruns if self.nruns <= math.factorial(d) else math.factorial(d)
-        for sample in tqdm.trange(len(X), desc="manifold bg samples"):
+        if self.silent:
+            run_range = range(len(X))
+        else:
+            run_range = tqdm.trange(len(X), desc="manifold bg samples")
+            
+        for sample in run_range:
             permutations = itertools.permutations(list(range(d)))
             x = np.array(X)[sample]
             for i in range(nruns):
@@ -256,11 +263,12 @@ class OnManifoldExplainer:
         
 class IndExplainer:
 
-    def __init__(self, f, X, nruns=100):
+    def __init__(self, f, X, nruns=100, silent=False):
         '''
         f: the model to explain, when called evaluate the model
         X: background value samples from X, assumes dataframe
         nruns: how many runs for each data point
+        silent: whether to show progress bar
         '''
         self.nruns = nruns
         # this only support single baseline, see ipynb how to use
@@ -268,6 +276,7 @@ class IndExplainer:
         self.bg = np.array(X[:1]) 
         self.feature_names =  list(X.columns)
         self.f = f
+        self.silent = silent
 
     def payoff(self, C):
         '''
@@ -296,7 +305,12 @@ class IndExplainer:
         self.fg = np.array(X)
         self.values = np.zeros((n_fg, d))
 
-        for i in tqdm.trange(self.nruns):
+        if self.silent:
+            run_range = range(self.nruns)
+        else:
+            run_range = tqdm.trange(self.nruns)
+            
+        for i in run_range:
             # sample an random ordering of features
             order = np.random.permutation(d)
             # follow the ordering to calculate payoff function difference

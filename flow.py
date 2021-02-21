@@ -1,6 +1,8 @@
 '''
 This file contains implementation of the Shapley Flow algorithm
 Author: Jiaxuan Wang
+
+The word baseline is used interchangeably with background
 '''
 import subprocess
 import time
@@ -182,7 +184,7 @@ class Graph:
                 m = LinearRegression().fit(X_train, y_train)
                 node.f = create_linear_f([a.name for a in node.args], m.predict)
                 
-    def to_graphviz(self, rankdir="TB"):
+    def to_graphviz(self, rankdir="BT"):
         '''
         convert to graphviz format
         '''
@@ -198,11 +200,11 @@ class Graph:
 
         return G
 
-    def draw(self):
+    def draw(self, rankdir="BT"):
         '''
         requires in ipython notebook environment
         '''
-        viz_graph(self.to_graphviz())
+        viz_graph(self.to_graphviz(rankdir=rankdir))
 
     def add_node(self, node):
         '''
@@ -514,7 +516,7 @@ class CreditFlow:
 
         self.edge_credit[node.from_node][node] += val
         if self.verbose:
-            print(f"assign {val[0]} credits to {node.from_node}->{node}")
+            print(f"assign {val[0]} credit{'s' if val[0] != 0 else ''} to {node.from_node}->{node}")
             if self.visualize:
                 if not self.dot.has_edge(node.from_node, node):
                     self.dot.add_edge(node.from_node, node)
@@ -676,7 +678,7 @@ class CreditFlow:
             order = list(np.random.permutation(sources))
             if self.verbose:
                 print(f"\n----> using order {order}")
-                print("baselines " +\
+                print("background " +\
                       ", ".join(map(lambda node: f"{node}: {node.last_val[0]}",
                                     order)))
             # follow the order
@@ -686,7 +688,7 @@ class CreditFlow:
                 node.from_node = None # turn off the source
 
                 if self.verbose:
-                    print(f"turn on edge from external source to {node}")
+                    print(f"turn on edge from the external source node to {node}")
                     print(f"{node} changes from {node.last_val[0]} to {node.val[0]}")
                     if self.visualize:
                         if node not in self.dot:
@@ -730,7 +732,7 @@ class CreditFlow:
             order = list(np.random.permutation(sources))
             if self.verbose:
                 print(f"\n----> using order {order}")
-                print("baselines " +\
+                print("background " +\
                       ", ".join(map(lambda node: f"{node}: {node.last_val[0]}",
                                     order)))
             # follow the order
@@ -992,7 +994,7 @@ class GraphExplainer:
         '''
         graph: graph to explain
         bg: background values, assumes dataframe
-        nruns: how many runs for each data point
+        nruns: how many monte carlo sampling
         silent: show progress bar or not
         '''
         assert isinstance(bg, pd.DataFrame), \
@@ -1203,7 +1205,7 @@ class GraphExplainer:
         self.set_noise_sampler()
 
     def shap_values(self, X, method='bruteforce_sampling',
-                    skip_prepare=False, rankdir='TB'):
+                    skip_prepare=False, rankdir='TB', **kwargs):
         """ Estimate the SHAP values for a set of samples.
 
         Parameters
@@ -1226,7 +1228,7 @@ class GraphExplainer:
                 raise e
             
         cf = CreditFlow(self.graph, nruns=self.nruns, rankdir=rankdir,
-                        silent=self.silent)
+                        silent=self.silent, **kwargs)
         cf.run(method, len_bg=len(self.bg))
         return cf
 
@@ -1755,7 +1757,32 @@ def flatten_graph(graph):
                 
     return graph
 
+def sample_graph(graph, val_dict):
+    '''
+    get a sample from the graph
+    val_dict is a name to value mapping, it should at least contain
+    all the source node values
+    output a pandas dataframe
+    '''
+    d = {}
+    for node in topo_sort(graph):
+        if node.name in val_dict:
+            v = val_dict[node.name]
+            if not isinstance(v, Iterable):
+                v = np.array([v])
+            node.val = v
+        else:
+            node.val = node.f(*[a.val for a in node.args])
+
+        d[node.name] = node.val
+    return pd.DataFrame.from_dict(d)
+    
 def eval_graph(graph, val_dict):
+    '''
+    evaluate the output of the target node of the graph
+    val_dict is a name to value mapping, it should at least contain
+    all the source node values
+    '''
     for node in topo_sort(graph):
         if node.name in val_dict:
             v = val_dict[node.name]
@@ -1947,7 +1974,7 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
     '''
     # preprocess the graph
     graph = single_source_graph(graph)
-    graph.reset() # reset baselines at source
+    graph.reset() # reset background at source
     sources = get_source_nodes(graph)
     sorted_nodes = topo_sort(graph)
     node2sorted_idx = dict((n, i) for i, n in enumerate(sorted_nodes))
@@ -2058,9 +2085,7 @@ def run_divide_and_conquer_set(graph, k=-1, verbose=False, len_bg=1):
 
             # reset all settings at source
             if len(node.args) == 0:
-                # later: note: for exact computation of multiple baselines,
-                # we need to compute for each baseline instead of sampling
-                graph.reset() # reset baselines at source
+                graph.reset() # reset background at source
                 if verbose:
                     print('\t' * level + f'turn on {node} from {node.baseline}->{node.target}')
                 node.val = node.target # turn on the source node
@@ -2176,9 +2201,7 @@ def run_divide_and_conquer(graph, k=-1, verbose=False, len_bg=1):
 
             # reset all settings at source
             if len(node.args) == 0:
-                # later: note: for exact computation of multipel baselines, we
-                # need to compute for each baseline instead of sampling
-                graph.reset() # reset baselines at source
+                graph.reset() # reset background at source
                 if verbose:
                     print('\t' * level + f'turn on {node} from {node.baseline}->{node.target}')
                 node.val = node.target # turn on the source node
@@ -2266,7 +2289,7 @@ def sample_build_graph():
 
     # initialize the values from data: now is just specified
     graph = Graph([x1, x2, y],
-                  # sample baseline
+                  # sample background value
                   {'x1': lambda: 0},
                   # target to explain
                   {'x1': lambda: 1})
