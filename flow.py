@@ -19,8 +19,6 @@ from functools import partial
 import xgboost
 import numpy as np
 import pandas as pd
-from pygraphviz import AGraph
-from graphviz import Source
 import tqdm
 import joblib
 import dill
@@ -188,6 +186,7 @@ class Graph:
         '''
         convert to graphviz format
         '''
+        from pygraphviz import AGraph
         G = AGraph(directed=True, rankdir=rankdir)
         for node1 in topo_sort(self.nodes):
             for node2 in node1.args:
@@ -492,6 +491,7 @@ class CreditFlow:
         '''
         initialize self.dot with the graph structure
         '''
+        from pygraphviz import AGraph
         self.rankdir = self.rankdir if hasattr(self, "rankdir") else "TB"
         dot = AGraph(directed=True, rankdir=self.rankdir)
         for node in topo_sort(graph):
@@ -812,6 +812,7 @@ class CreditFlow:
 
         idx: the index of target to visualize, if negative assumes sum
         '''
+        from pygraphviz import AGraph        
         self.rankdir = self.rankdir if hasattr(self, "rankdir") else "TB"
         G = AGraph(directed=True, rankdir=self.rankdir)
 
@@ -1482,6 +1483,7 @@ def viz_graph(G):
     convert G (pygraphviz) to graphviz format and display with 
     ipython display
     '''
+    from graphviz import Source    
     display(Source(G.string()))
 
 def save_graph(G, name, layout="dot"):

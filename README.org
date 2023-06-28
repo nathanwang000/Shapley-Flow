@@ -24,21 +24,22 @@
   - [[./linear_evaluation.py][Evaluation code for paper Section 4.3]]
 
 ** Installation
+ 
+We rely on pygraphviz for visualization. Installing pygraphviz requires to
+install graphviz first, see this [[https://stackoverflow.com/questions/40266604/pip-install-pygraphviz-fails-failed-building-wheel-for-pygraphviz][post]] if pygraphviz fails to
+install.
 
-   The following way to install dependency is no longer working, I'm looking into the problem.
-
-   In the mean time, try
+*** install dependencies via pip
+ 
    #+BEGIN_SRC bash
-   python3 -m venv venv # create virtual env, I'm using python 3.10.8
-   . venv/bin/activate
-   pip install xgboost
-   pip install pandas
-   pip install tqdm
-   pip install joblib
-   pip install dill
-   pip install scikit-learn
+   pip3 install shapflow
    #+END_SRC
 
+   #+BEGIN_SRC python
+   from shapflow import flow
+   flow.example_concise() # running the sanity check example in flow.py
+   #+END_SRC
+   
    get graphviz related packages
    #+BEGIN_SRC bash
    brew install graphviz # for mac os
@@ -55,7 +56,27 @@
    python flow.py # should output a print out of flow credit for a sample graph
    #+END_SRC
    
-*** Deprecated
+*** manually installing via pip one by one
+
+   #+BEGIN_SRC bash
+   python3 -m venv venv # create virtual env, I'm using python 3.10.8
+   . venv/bin/activate
+   pip install xgboost
+   pip install pandas
+   pip install tqdm
+   pip install joblib
+   pip install dill
+   pip install scikit-learn
+   #+END_SRC
+
+   One can check that the installation works:
+   #+BEGIN_SRC bash
+   python flow.py # should output a print out of flow credit for a sample graph
+   #+END_SRC
+   
+*** install via pipenv
+   Some users reported errors installing using pipenv, try the above 2 methods first
+   
    Install dependencies using pipenv
    
    #+BEGIN_SRC bash
@@ -63,13 +84,5 @@
    pipenv shell # create a shell that can later deactivate by Ctrl-d
    pipenv install # install all packages in Pipfile
    #+END_SRC
-   
-   We rely on pygraphviz for visualization. Installing pygraphviz requires to
-   install graphviz first, see this [[https://stackoverflow.com/questions/40266604/pip-install-pygraphviz-fails-failed-building-wheel-for-pygraphviz][post]] if pygraphviz fails to
-   install.
 
-   One can check that the installation works:
-   #+BEGIN_SRC bash
-   python flow.py # should output a print out of flow credit for a sample graph
-   #+END_SRC
    
